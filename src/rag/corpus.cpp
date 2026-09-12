@@ -456,7 +456,7 @@ const std::vector<Chunk>& Corpus::chunks() const {return chunks_;}
 const Bm25Index& Corpus::bm25() const { return bm25_; }
 const DenseIndex& Corpus::dense() const { return dense_; }
 
-std::vector<std::pair<std::uint32_t, double>>
+SearchResult
 Corpus::search(std::string_view query, const EmbedBackend& backend,
                const EmbedConfig& cfg, std::size_t k) const {
     if (chunks_.empty()) return {};

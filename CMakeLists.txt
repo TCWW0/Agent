@@ -83,6 +83,7 @@ add_library(
     src/tool/memory_tools.cpp
     src/tool/skills.cpp
     src/tool/skill_tools.cpp
+    src/tool/docs_tools.cpp
 )
 
 target_include_directories(
@@ -99,6 +100,81 @@ target_compile_features(
 target_link_libraries(
     my_agent_tools
     PUBLIC nlohmann_json::nlohmann_json
+)
+
+# ── rag: 文档 RAG 主干（学习线切片 #40~#43）───────────────────────────────
+# 叶子模块：不依赖 tool/runtime/ui。教材 = agentty/src/rag/。
+# 切片 #40：chunker + tokenize + BM25（词匹配路）。
+# 切片 #41：语义路（embed.cpp）+ 混合检索（hybrid.cpp）。
+add_library(
+    my_agent_rag
+    src/rag/bm25.cpp
+    src/rag/corpus.cpp
+    src/rag/embed.cpp
+    src/rag/hybrid.cpp
+)
+
+# 接口纯净原则（#41 拍板）：http/json 是 rag 的实现依赖，PRIVATE ——
+# 不向 rag_test/rag_bench 等下游传递（rag.hpp 里一个相关 include 都没有）。
+target_link_libraries(
+    my_agent_rag
+    PRIVATE
+        my_agent_http
+        nlohmann_json::nlohmann_json
+)
+
+target_include_directories(
+    my_agent_rag
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_rag
+    PUBLIC cxx_std_26
+)
+
+add_executable(
+    rag_test
+    tests/rag_test.cpp
+)
+
+target_link_libraries(
+    rag_test
+    PRIVATE
+        my_agent_rag
+        GTest::gtest_main
+        # #41 Red 测试要断言 JSON（拼包/解析纯函数）， PRIVATE 即可
+        nlohmann_json::nlohmann_json
+)
+
+gtest_discover_tests(
+    rag_test
+    TEST_PREFIX "rag."
+)
+
+# search_docs 工具（#43）：search_docs.hpp 公共接缝暴露 rag 类型，故
+# PUBLIC —— rag 保持叶子、单向无环（rag 不回头依赖 tool）。
+target_link_libraries(
+    my_agent_tools
+    PUBLIC my_agent_rag
+)
+
+add_executable(
+    search_docs_tool_test
+    tests/search_docs_tool_test.cpp
+)
+
+target_link_libraries(
+    search_docs_tool_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    search_docs_tool_test
+    TEST_PREFIX "search_docs."
 )
 
 # 传输层：httplib 只在 .cpp 内可见，头文件不泄漏 HTTP 库细节
@@ -979,57 +1055,6 @@ target_link_libraries(
 gtest_discover_tests(
     terminal_test
     TEST_PREFIX "terminal."
-)
-
-# ── rag: 文档 RAG 主干（学习线切片 #40~#43）───────────────────────────────
-# 叶子模块：不依赖 tool/runtime/ui。教材 = agentty/src/rag/。
-# 切片 #40：chunker + tokenize + BM25（词匹配路）。
-# 切片 #41：语义路（embed.cpp）+ 混合检索（hybrid.cpp）。
-add_library(
-    my_agent_rag
-    src/rag/bm25.cpp
-    src/rag/corpus.cpp
-    src/rag/embed.cpp
-    src/rag/hybrid.cpp
-)
-
-# 接口纯净原则（#41 拍板）：http/json 是 rag 的实现依赖，PRIVATE ——
-# 不向 rag_test/rag_bench 等下游传递（rag.hpp 里一个相关 include 都没有）。
-target_link_libraries(
-    my_agent_rag
-    PRIVATE
-        my_agent_http
-        nlohmann_json::nlohmann_json
-)
-
-target_include_directories(
-    my_agent_rag
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_rag
-    PUBLIC cxx_std_26
-)
-
-add_executable(
-    rag_test
-    tests/rag_test.cpp
-)
-
-target_link_libraries(
-    rag_test
-    PRIVATE
-        my_agent_rag
-        GTest::gtest_main
-        # #41 Red 测试要断言 JSON（拼包/解析纯函数）， PRIVATE 即可
-        nlohmann_json::nlohmann_json
-)
-
-gtest_discover_tests(
-    rag_test
-    TEST_PREFIX "rag."
 )
 
 # 检索质量基准：已知答案合成（tf×idf top-4 拼查询，gold = 该块自身），

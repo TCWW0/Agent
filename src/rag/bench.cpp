@@ -354,7 +354,8 @@ int main(int argc, char** argv) {
         report_row("dense-only", run_ladder(cases, chunks, k, pool, dense_search), k);
         const Ladder a_hybrid = run_ladder(cases, chunks, k, pool,
             [&](const std::string& q) {
-                return rag::hybrid_search(idx, dense, q, rag::ollama_embed, cfg, pool);
+                return rag::hybrid_search(idx, dense, q, rag::ollama_embed,
+                                          cfg, pool).hits;
             });
         report_row("hybrid", a_hybrid, k);
         std::cout << "  (dense/hybrid 计时含每查询一次 embed 网络往返)\n";
@@ -412,7 +413,8 @@ int main(int argc, char** argv) {
         report_row("dense-only", run_ladder(probes, chunks, k, pool, dense_search), k);
         const Ladder b_hybrid = run_ladder(probes, chunks, k, pool,
             [&](const std::string& q) {
-                return rag::hybrid_search(idx, dense, q, rag::ollama_embed, cfg, pool);
+                return rag::hybrid_search(idx, dense, q, rag::ollama_embed,
+                                          cfg, pool).hits;
             });
         report_row("hybrid", b_hybrid, k);
     }

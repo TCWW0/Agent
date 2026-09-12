@@ -2,6 +2,7 @@
 #include "memory_tools.hpp"
 #include "skill_tools.hpp"
 #include "my_agent/tool/memory_store.hpp"
+#include "my_agent/tool/search_docs.hpp"
 #include "my_agent/tool/skills.hpp"
 #include "my_agent/tool/tool.hpp"
 
@@ -131,6 +132,10 @@ namespace {
         for (ToolDef& tool : detail::make_skill_tools(std::move(skill_engine))) {
             tools.push_back(std::move(tool));
         }
+
+        // search_docs（#43）：懒建库 —— 首次调用才 fingerprint walk + build，
+        // 注册本身零 IO 零网络。
+        tools.push_back(docs::make_search_docs_tool());
 
         return tools;
     }

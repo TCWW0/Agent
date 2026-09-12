@@ -745,12 +745,12 @@ TEST(Hybrid, FusesBm25AndDenseIntoRRFOrder) {
         return std::vector<std::vector<float>>{{1.f, 0.1f}};
     };
     const auto fused = rag::hybrid_search(idx, dense, "beta", backend, cfg, 3);
-    ASSERT_EQ(fused.size(), 3u);
+    ASSERT_EQ(fused.hits.size(), 3u);
     // RRF 手算：B = 1/62(词法r2) + 1/61(语义r1) > A = 1/61 + 1/63 > C = 1/62
-    EXPECT_EQ(fused[0].first, 1u);
-    EXPECT_EQ(fused[1].first, 0u);
-    EXPECT_EQ(fused[2].first, 2u);   // C 词法路根本没看见 —— 靠语义路浮上来
-    EXPECT_DOUBLE_EQ(fused[0].second, 1.0 / 62.0 + 1.0 / 61.0);
+    EXPECT_EQ(fused.hits[0].first, 1u);
+    EXPECT_EQ(fused.hits[1].first, 0u);
+    EXPECT_EQ(fused.hits[2].first, 2u);   // C 词法路根本没看见 —— 靠语义路浮上来
+    EXPECT_DOUBLE_EQ(fused.hits[0].second, 1.0 / 62.0 + 1.0 / 61.0);
 }
 
 TEST(Hybrid, ZeroCosineChunksStayOutOfDenseRank) {
@@ -771,10 +771,10 @@ TEST(Hybrid, ZeroCosineChunksStayOutOfDenseRank) {
         return std::vector<std::vector<float>>{{1.f, 0.f}};
     };
     const auto fused = rag::hybrid_search(idx, dense, "beta", backend, cfg, 5);
-    ASSERT_EQ(fused.size(), 1u);   // Z 两路都没份
-    EXPECT_EQ(fused[0].first, 0u);
+    ASSERT_EQ(fused.hits.size(), 1u);   // Z 两路都没份
+    EXPECT_EQ(fused.hits[0].first, 0u);
     // A = 词法第1名 + 语义第1名
-    EXPECT_DOUBLE_EQ(fused[0].second, 2.0 / 61.0);
+    EXPECT_DOUBLE_EQ(fused.hits[0].second, 2.0 / 61.0);
 }
 
 TEST(Hybrid, EmptyDenseDegradesToBm25WithoutCallingBackend) {
@@ -793,7 +793,7 @@ TEST(Hybrid, EmptyDenseDegradesToBm25WithoutCallingBackend) {
     const rag::EmbedConfig cfg{.model = "fake-model"};
     const auto fused =
         rag::hybrid_search(idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused, rag::bm25_search(idx, "beta", 2));   // 逐位一致，含原始分
+    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));   // 逐位一致，含原始分
     EXPECT_FALSE(called);   // dense 空 → 查询向量化都是浪费
 }
 
@@ -812,7 +812,7 @@ TEST(Hybrid, QueryEmbedFailureDegradesToBm25) {
     const rag::EmbedConfig cfg{.model = "fake-model"};
     const auto fused =
         rag::hybrid_search(idx, dense, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused, rag::bm25_search(idx, "beta", 2));
+    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));
 }
 
 TEST(Hybrid, EmptyModelDegradesWithoutCallingBackend) {
@@ -831,9 +831,103 @@ TEST(Hybrid, EmptyModelDegradesWithoutCallingBackend) {
     const rag::EmbedConfig cfg{.model = ""};   // 未配模型 = BM25-only
     const auto fused =
         rag::hybrid_search(idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused, rag::bm25_search(idx, "beta", 2));
+    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));
     EXPECT_FALSE(called);
 }
+// ── #43 接缝扩展：SearchMode（降级真相从降级发生处带出）──────────────────
+// 模式是量纲声明：hybrid = RRF 融合分，BM25-only = BM25 原始分。
+// search_docs 工具的 mode 行直接抄这里的结果，猜错 = 对模型撒谎。
+
+TEST(SearchMode, HybridReportsHybridWhenBothPathsLive) {
+    const std::vector<rag::Chunk> chunks{
+        make_chunk("beta"),         // A: id 0
+        make_chunk("alpha beta"),   // B: id 1
+        make_chunk("gamma gamma"),  // C: id 2
+    };
+    const rag::Bm25Index idx = rag::build_bm25(chunks);
+    const rag::DenseIndex dense{{{0.f, 1.f}, {1.f, 0.f}, {1.f, 1.f}}};
+    const rag::EmbedConfig cfg{.model = "fake-model"};
+    const rag::EmbedBackend backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>&,
+           rag::EmbedRole)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        return std::vector<std::vector<float>>{{1.f, 0.1f}};
+    };
+    const auto r = rag::hybrid_search(idx, dense, "beta", backend, cfg, 3);
+    EXPECT_EQ(r.mode, rag::SearchMode::Hybrid);
+}
+
+TEST(SearchMode, DegradePathsAllReportBm25Only) {
+    const std::vector<rag::Chunk> chunks{make_chunk("beta"),
+                                         make_chunk("alpha beta")};
+    const rag::Bm25Index idx = rag::build_bm25(chunks);
+    const rag::DenseIndex dense{{{1.f, 0.f}, {0.f, 1.f}}};
+    const rag::EmbedConfig cfg{.model = "fake-model"};
+
+    // ① dense 空
+    const rag::EmbedBackend ok_backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>&,
+           rag::EmbedRole)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        return std::vector<std::vector<float>>{{1.f, 0.f}};
+    };
+    EXPECT_EQ(rag::hybrid_search(idx, rag::DenseIndex{}, "beta", ok_backend,
+                                 cfg, 2).mode,
+              rag::SearchMode::Bm25Only);
+
+    // ② model 空（未配置 = 合法降级，不是错误）
+    EXPECT_EQ(rag::hybrid_search(idx, dense, "beta", ok_backend,
+                                 rag::EmbedConfig{}, 2).mode,
+              rag::SearchMode::Bm25Only);
+
+    // ③ query embed 失败（瞬断场景 —— 事后猜模式在这里撒谎）
+    const rag::EmbedBackend fail_backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>&,
+           rag::EmbedRole)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        return std::unexpected(std::string{"模拟瞬断"});
+    };
+    EXPECT_EQ(rag::hybrid_search(idx, dense, "beta", fail_backend, cfg, 2).mode,
+              rag::SearchMode::Bm25Only);
+
+    // ④ dense 名次表为空（全库零相似/无正相似）
+    //const rag::DenseIndex rotten{{{2.f, 0.f}, {0.f, 2.f}}};  // 与查询向量正交  (错误。为同向而非正交)
+    const rag::DenseIndex rotten{{{0.f, 1.f}, {0.f, 2.f}}};
+    EXPECT_EQ(rag::hybrid_search(idx, rotten, "beta", ok_backend, cfg, 2).mode,
+              rag::SearchMode::Bm25Only);
+
+    // 只有有任一一个结果与查询不是零相似，那么 embedding 就会参与评分，此时会进入 Hybird
+    const rag::DenseIndex rotten1{{{2.f, 0.f}, {0.f, 2.f}}};
+    EXPECT_EQ(rag::hybrid_search(idx, rotten1, "beta", ok_backend, cfg, 2).mode,
+              rag::SearchMode::Hybrid);
+}
+
+TEST(SearchMode, CorpusSearchPropagatesMode) {
+    const std::vector<rag::Chunk> chunks{make_chunk("beta")};
+    const rag::EmbedBackend backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>& texts,
+           rag::EmbedRole role)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        (void)texts;
+        (void)role;
+        return std::vector<std::vector<float>>(texts.size(),
+                                               std::vector<float>{1.f, 0.f});
+    };
+    rag::Corpus c;
+    c.build_from_memory({{"a.md", "beta content"}}, backend,
+                        rag::EmbedConfig{.model = "fake-model"});
+    ASSERT_TRUE(c.has_embeddings());
+    EXPECT_EQ(c.search("beta", backend,
+                       rag::EmbedConfig{.model = "fake-model"}, 3).mode,
+              rag::SearchMode::Hybrid);
+    EXPECT_EQ(c.search("beta", backend, rag::EmbedConfig{}, 3).mode,
+              rag::SearchMode::Bm25Only);
+}
+
 // ── 切片 #42：Corpus 目录建库 + 增量缓存 ─────────────────────────────────
 // 夹具约定：三个主题词互斥的文档（zephyr∈A / harbor∈B / quartz∈C），
 // 检索断言才有唯一答案；假后端向量按文本内容确定性生成，同文本永远同
@@ -952,7 +1046,7 @@ TEST(CorpusBuild, MissingOrEmptyRootGivesEmptyCorpus) {
     EXPECT_EQ(stats.files_seen, 0u);
     EXPECT_EQ(c.chunk_count(), 0u);
     EXPECT_FALSE(c.has_embeddings());
-    EXPECT_TRUE(c.search("anything", be.fn(), cfg, 3).empty());
+    EXPECT_TRUE(c.search("anything", be.fn(), cfg, 3).hits.empty());
 
     // 空目录同语义
     TempDir dir;
@@ -960,7 +1054,7 @@ TEST(CorpusBuild, MissingOrEmptyRootGivesEmptyCorpus) {
     const auto stats2 = c2.build(dir.path(), be.fn(), cfg);
     EXPECT_EQ(stats2.files_seen, 0u);
     EXPECT_EQ(c2.chunk_count(), 0u);
-    EXPECT_TRUE(c2.search("anything", be.fn(), cfg, 3).empty());
+    EXPECT_TRUE(c2.search("anything", be.fn(), cfg, 3).hits.empty());
 
     EXPECT_EQ(be.calls, 0u);   // 空语料一次都不嵌
 }
@@ -992,16 +1086,16 @@ TEST(CorpusBuild, BuildsRecursesAndFiltersThenSearches) {
 
     // 主题词唯一 → 首命中即正确文档
     const auto ha = c.search("zephyr", be.fn(), cfg, 3);
-    ASSERT_FALSE(ha.empty());
-    EXPECT_EQ(c.chunks()[ha[0].first].path, "a.md");
+    ASSERT_FALSE(ha.hits.empty());
+    EXPECT_EQ(c.chunks()[ha.hits[0].first].path, "a.md");
     const auto hc = c.search("quartz", be.fn(), cfg, 3);
-    ASSERT_FALSE(hc.empty());
-    EXPECT_EQ(c.chunks()[hc[0].first].path, "sub/c.md");
+    ASSERT_FALSE(hc.hits.empty());
+    EXPECT_EQ(c.chunks()[hc.hits[0].first].path, "sub/c.md");
 
     // .txt 里的词在词法路上检索不到（未配模型 → 恒等降级 bm25_search，
     // 空 BM25 命中 = 干净的扩展名过滤证据）
     const rag::EmbedConfig bm25_cfg{};
-    EXPECT_TRUE(c.search("harbor", be.fn(), bm25_cfg, 3).empty());
+    EXPECT_TRUE(c.search("harbor", be.fn(), bm25_cfg, 3).hits.empty());
 }
 
 TEST(CorpusCache, SecondBuildHitsCacheWithZeroEmbeds) {
@@ -1036,10 +1130,10 @@ TEST(CorpusCache, SecondBuildHitsCacheWithZeroEmbeds) {
     for (const char* q : {"zephyr", "harbor"}) {
         const auto h1 = first.search(q, be1.fn(), cfg, 3);
         const auto h2 = second.search(q, be2.fn(), cfg, 3);
-        ASSERT_FALSE(h1.empty());
-        ASSERT_FALSE(h2.empty());
-        EXPECT_EQ(chunk_key(first.chunks()[h1[0].first]),
-                  chunk_key(second.chunks()[h2[0].first]));
+        ASSERT_FALSE(h1.hits.empty());
+        ASSERT_FALSE(h2.hits.empty());
+        EXPECT_EQ(chunk_key(first.chunks()[h1.hits[0].first]),
+                  chunk_key(second.chunks()[h2.hits[0].first]));
     }
 }
 
@@ -1079,8 +1173,8 @@ TEST(CorpusCache, ChangedFileReembedsOnlyThatFile) {
 
     // 变更后的内容可检索（重建不是空转）
     const auto hits = second.search("lighthouse", be2.fn(), cfg, 3);
-    ASSERT_FALSE(hits.empty());
-    EXPECT_EQ(second.chunks()[hits[0].first].path, "b.md");
+    ASSERT_FALSE(hits.hits.empty());
+    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "b.md");
 }
 
 TEST(CorpusCache, DeletedFileDropsItsChunks) {
@@ -1174,8 +1268,8 @@ TEST(CorpusCache, ChunkerIdentityMismatchInvalidatesAll) {
     ASSERT_TRUE(s2.dense_ok);
     EXPECT_EQ(second.chunk_count(), total);  // 内容照常正确
     const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
-    ASSERT_FALSE(hits.empty());
-    EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+    ASSERT_FALSE(hits.hits.empty());
+    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
 }
 
 TEST(CorpusCache, CorruptCacheSilentlyRebuilds) {
@@ -1210,8 +1304,8 @@ TEST(CorpusCache, CorruptCacheSilentlyRebuilds) {
         ASSERT_TRUE(s2.dense_ok);
         EXPECT_EQ(second.chunk_count(), total);
         const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
-        ASSERT_FALSE(hits.empty());
-        EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+        ASSERT_FALSE(hits.hits.empty());
+        EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
     }
 }
 
@@ -1236,8 +1330,8 @@ TEST(CorpusBuild, EmbedFailureDegradesToBm25AndKeepsCache) {
     EXPECT_FALSE(second.has_embeddings());   // 不交半截 dense
     ASSERT_GT(second.chunk_count(), 0u);     // 块照常在，检索走词法路
     const auto hits = second.search("zephyr", be_fail.fn(), cfg, 3);
-    ASSERT_FALSE(hits.empty());
-    EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+    ASSERT_FALSE(hits.hits.empty());
+    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
 
     // 失败会话不写缓存：旧缓存（a.md 带向量）原样保留 → 下次好后端
     // build 时 a.md 零嵌入。若失败会话写了无向量缓存，a.md 也会被重嵌，
@@ -1308,10 +1402,10 @@ TEST(CorpusBuild, FromMemoryMatchesFolderBuild) {
     for (const char* q : {"zephyr", "harbor", "installer"}) {
         const auto h1 = from_dir.search(q, be1.fn(), cfg, 3);
         const auto h2 = from_mem.search(q, be2.fn(), cfg, 3);
-        ASSERT_EQ(h1.size(), h2.size());
-        for (std::size_t i = 0; i < h1.size(); ++i)
-            EXPECT_EQ(chunk_key(from_dir.chunks()[h1[i].first]),
-                      chunk_key(from_mem.chunks()[h2[i].first]))
+        ASSERT_EQ(h1.hits.size(), h2.hits.size());
+        for (std::size_t i = 0; i < h1.hits.size(); ++i)
+            EXPECT_EQ(chunk_key(from_dir.chunks()[h1.hits[i].first]),
+                      chunk_key(from_mem.chunks()[h2.hits[i].first]))
                 << "query=" << q << " rank=" << i;
     }
 }

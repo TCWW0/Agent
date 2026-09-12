@@ -147,7 +147,21 @@ embed_corpus(const std::vector<Chunk>& chunks,
 // 降级语义在函数内部：dense.vecs 为空、cfg.model 为空、或本次 query
 // embed 失败 → 直接返回 bm25_search 结果（此时返回的分数是 BM25 原始分；
 // bench 的两级阶梯各自直调 bm25_search / hybrid_search，不经过降级路径）。
-[[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
+//
+// 模式报告（#43）：降级是静默发生的，但调用方（search_docs 工具）必须
+// 诚实标注结果走了哪条路 —— RRF 融合分与 BM25 原始分量纲不同，mode 行
+// 就是量纲声明。所以降级真相只能从降级发生处带出来；调用方事后猜
+// （has_embeddings() && model 非空 → hybrid）在瞬断时会撒谎。
+enum class SearchMode { Hybrid, Bm25Only };
+
+struct SearchResult {
+    // (chunk-id, 分数)。hybrid = RRF 融合分（上界 ≈ 参与融合的路数/61）；
+    // BM25-only = BM25 原始分（无上界）。量纲由 mode 声明，分数不做归一化。
+    std::vector<std::pair<std::uint32_t, double>> hits;
+    SearchMode mode = SearchMode::Bm25Only;
+};
+
+[[nodiscard]] SearchResult
 hybrid_search(const Bm25Index& bm25, const DenseIndex& dense,
               std::string_view query, const EmbedBackend& backend,
               const EmbedConfig& cfg, std::size_t k);
@@ -261,8 +275,9 @@ public:
     [[nodiscard]] const DenseIndex& dense() const;
 
     // 薄委托 hybrid_search：dense 空/未配模型/查询 embed 失败 → 恒等
-    // 降级 bm25_search 语义。返回 (chunk-id, 融合分)。
-    [[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
+    // 降级 bm25_search 语义。模式随 SearchResult 一路带出 —— Corpus 不
+    // 加判断、不丢信息。
+    [[nodiscard]] SearchResult
     search(std::string_view query, const EmbedBackend& backend,
            const EmbedConfig& cfg, std::size_t k) const;
 
