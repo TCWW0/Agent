@@ -4,6 +4,12 @@
 //   probe_n  改写探针样本数（默认 100；0 = 不跑探针）
 //   embed_model  dense 路模型（默认 nomic-embed-text:latest）
 //
+// #42 起建库走 Corpus（目录 → 块 + BM25 + dense + 增量缓存）：首跑全量
+// 嵌入（分钟级），此后未变文件直接搬运 —— [corpus] 行是 #42 的验收
+// 数字：第二跑应 reused=全量、embedded=0、build 秒级。
+// 三级阶梯的度量口径与 #41 基线逐位相同（同 pool、直调 bm25_search /
+// hybrid_search，经 Corpus 的只读视图取索引），跨切片可比。
+//
 // 阶梯设计（#41 验收口径「差值可测且可解释」，非「hybrid 必须更高」）：
 //   阶梯A 合成查询（BM25 主场）：查询词就是从块里按 tf-idf 挑的，词法
 //         命中接近满分 —— hybrid 不加分甚至反降都在预期内（官方数据
@@ -155,13 +161,15 @@ void report_row(std::string_view name, const Ladder& l, std::size_t k) {
 
 // ── 改写探针：LLM 针对 gold 块重新措辞 ───────────────────────────────────
 
-std::string chunk_key(const rag::Chunk& c) {
+std::string chunk_key(const fs::path& root, const rag::Chunk& c) {
     // "|v3" 是改写器版本：prompt 语义变了就必须换键，否则旧改写命中缓存
     // 把修复静默吞掉。v2 教训：「与文档相同语言」的指令写在中文 prompt 里
     // 会被 prompt 自身的语言锚压过（模型跟着 prompt 语言走）——v3 起由
     // 代码检测文档语言、直接用该语言写 prompt，指令与锚强制一致。
-    return c.path + ":" + std::to_string(c.line_start) + "-" + std::to_string(c.line_end)
-         + "|v3";
+    // 路径用绝对形式：#41 时期的键就是绝对路径，保持一致才能复用存量
+    // 改写缓存（#42 起 Corpus 块路径是相对 root 的，这里拼回去）。
+    return (root / c.path).string() + ":" + std::to_string(c.line_start)
+         + "-" + std::to_string(c.line_end) + "|v3";
 }
 
 // 文档里有没有 CJK 字符（UTF-8 首字节 E4..E9 覆盖 U+4E00..U+9FFF 常用区）。
@@ -267,27 +275,28 @@ int main(int argc, char** argv) {
     const std::size_t probe_n = argc >= 4 ? std::stoul(argv[3]) : 100;
     const std::string embed_model = argc >= 5 ? argv[4] : "nomic-embed-text:latest";
 
-    // 1) 收语料：递归找 .md，路径排序 —— 目录遍历顺序不定，排序换确定性。
-    std::vector<fs::path> files;
-    for (const auto& entry : fs::recursive_directory_iterator(root))
-        if (entry.is_regular_file() && entry.path().extension() == ".md")
-            files.push_back(entry.path());
-    std::sort(files.begin(), files.end());
-    if (files.empty()) {
-        std::cerr << "目录里没有 .md: " << root << "\n";
+    // 1)+2)+4) Corpus 建库（#42 起，原「收语料 + 词法建库 + 语义建库」
+    //    三步合一）：目录 → 块 + BM25 + dense + 增量缓存。embed 失败 →
+    //    Corpus 内部降级 BM25-only（dense_ok=false），下面两级阶梯跳过。
+    rag::EmbedConfig cfg{.host = kOllamaHost, .port = kOllamaPort,
+                         .model = embed_model, .timeout_ms = 60000};
+    rag::Corpus corpus;
+    rag::Corpus::BuildStats st;
+    double build_s = 0.0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        st = corpus.build(root, rag::ollama_embed, cfg);
+        build_s = std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - t0).count();
+    }
+    const std::vector<rag::Chunk>& chunks = corpus.chunks();
+    const rag::Bm25Index&          idx    = corpus.bm25();
+    const rag::DenseIndex&         dense  = corpus.dense();
+    const bool dense_ok = st.dense_ok;
+    if (chunks.empty()) {
+        std::cerr << "目录里没有可用 .md: " << root << "\n";
         return 1;
     }
-
-    // 2) 建库（词法路）：真实语料 chunk → 倒排索引。
-    std::vector<rag::Chunk> chunks;
-    for (const auto& f : files) {
-        std::ifstream in(f, std::ios::binary);
-        std::string body{std::istreambuf_iterator<char>(in),
-                         std::istreambuf_iterator<char>()};
-        for (auto& c : rag::chunk_document(f.string(), body))
-            chunks.push_back(std::move(c));
-    }
-    const rag::Bm25Index idx = rag::build_bm25(chunks);
 
     // 3) 合成已知答案查询（过短块词袋贫乏，只会污染指标）。
     std::vector<Case> cases;
@@ -296,33 +305,24 @@ int main(int argc, char** argv) {
             cases.push_back({synthesize_query(chunks[d], idx), d});
 
     const std::size_t pool = std::max<std::size_t>(k * 5, 30);
-    std::cout << "files=" << files.size()
+    const char* cache_state =
+        st.files_reused == 0                        ? "miss(全量重建)"
+        : (st.files_reused == st.files_seen && st.chunks_embedded == 0)
+                                                   ? "hit(全命中)"
+                                                    : "partial(部分命中)";
+    std::cout << "files=" << st.files_seen
               << " chunks=" << chunks.size()
               << " queries=" << cases.size()
               << " k=" << k << " probe_n=" << probe_n
               << " rrf_k=" << rag::kRrfK << "\n";
-
-    // 4) 建库（语义路）：整库向量化。失败则 hybrid 两级降级跳过（bench 的
-    //    两级阶梯直调 bm25_search / hybrid_search，不走 hybrid 内部降级）。
-    rag::EmbedConfig cfg{.host = kOllamaHost, .port = kOllamaPort,
-                         .model = embed_model, .timeout_ms = 60000};
-    bool dense_ok = false;
-    rag::DenseIndex dense;
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        auto built = rag::embed_corpus(chunks, rag::ollama_embed, cfg);
-        const auto s = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (built) {
-            dense = std::move(*built);
-            dense_ok = true;
-            std::cout << "[dense] " << embed_model
-                      << " dim=" << (dense.vecs.empty() ? 0 : dense.vecs[0].size())
-                      << " build=" << s << "s\n";
-        } else {
-            std::cout << "[dense] 建库失败，hybrid/dense 两级跳过: " << built.error() << "\n";
-        }
-    }
+    std::cout << "[corpus] model=" << embed_model
+              << (st.dense_ok ? " dense=ok" : " dense=降级bm25-only")
+              << " dim=" << (dense.vecs.empty() ? 0 : dense.vecs[0].size())
+              << "  reused=" << st.files_reused << "/" << st.files_seen
+              << " rechunked=" << st.files_rechunked
+              << " embedded=" << st.chunks_embedded
+              << "  build=" << build_s << "s"
+              << "  cache=" << cache_state << "\n";
 
     // dense 单路检索：query 向量 + 全库 cosine 线性扫 —— 与 hybrid_search
     // 内部同口径（只收 cosine>0、截断 pool、同分按 chunk-id 升序）。
@@ -373,7 +373,7 @@ int main(int argc, char** argv) {
     std::size_t fresh = 0, dropped = 0;
     for (std::size_t i = 0; i < probe_pick.size(); ++i) {
         const rag::Chunk& gold = chunks[cases[probe_pick[i]].gold];
-        const std::string key = chunk_key(gold);
+        const std::string key = chunk_key(root, gold);
         if (auto it = cache.find(key); it != cache.end()) {
             probes.push_back({it->second, cases[probe_pick[i]].gold});
             continue;

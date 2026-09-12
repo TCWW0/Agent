@@ -3,11 +3,16 @@
 
 #include "my_agent/rag/rag.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include <cstdint>
@@ -828,4 +833,485 @@ TEST(Hybrid, EmptyModelDegradesWithoutCallingBackend) {
         rag::hybrid_search(idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
     EXPECT_EQ(fused, rag::bm25_search(idx, "beta", 2));
     EXPECT_FALSE(called);
+}
+// ── 切片 #42：Corpus 目录建库 + 增量缓存 ─────────────────────────────────
+// 夹具约定：三个主题词互斥的文档（zephyr∈A / harbor∈B / quartz∈C），
+// 检索断言才有唯一答案；假后端向量按文本内容确定性生成，同文本永远同
+// 向量 —— 缓存命中前后的检索结果才可比。块身份比较一律用 (path, 行区间)，
+// 不比 chunk-id：目录遍历顺序不保证跨进程稳定。
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// RAII 临时目录：测试语料的家，析构时连缓存一起清掉。
+class TempDir {
+public:
+    TempDir() {
+        static std::uint64_t seq = 0;
+        const auto ns =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path_ = fs::temp_directory_path() / ("my_agent_rag_test_"
+                                             + std::to_string(ns) + "_"
+                                             + std::to_string(seq++));
+        fs::create_directories(path_);
+    }
+    ~TempDir() { std::error_code ec; fs::remove_all(path_, ec); }
+    TempDir(const TempDir&)            = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    [[nodiscard]] const fs::path& path() const { return path_; }
+
+private:
+    fs::path path_;
+};
+
+void write_file(const fs::path& p, std::string_view content) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p, std::ios::binary) << std::string(content);
+}
+
+std::string read_file(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in),
+            std::istreambuf_iterator<char>()};
+}
+
+// 可编程假后端：记录 Doc 角色收到的输入、调用计数、可注入失败。
+struct FakeBackend {
+    std::vector<std::string> doc_inputs;
+    std::size_t calls = 0;
+    bool fail = false;
+
+    [[nodiscard]] rag::EmbedBackend fn() {
+        return [this](const rag::EmbedConfig&,
+                      const std::vector<std::string>& texts,
+                      rag::EmbedRole role)
+            -> std::expected<std::vector<std::vector<float>>, std::string> {
+            ++calls;
+            if (fail) return std::unexpected(std::string{"模拟后端故障"});
+            if (role == rag::EmbedRole::Doc)
+                doc_inputs.insert(doc_inputs.end(), texts.begin(), texts.end());
+            // 确定性伪向量：同文本永远同向量（维度恒 2，跨批不乱）
+            std::vector<std::vector<float>> out;
+            out.reserve(texts.size());
+            for (const auto& t : texts)
+                out.push_back({static_cast<float>(t.size() % 89 + 1), 1.f});
+            return out;
+        };
+    }
+};
+
+// Corpus 喂给 backend 的块输入应与「直接 chunk_document + 拼装」逐条一致
+// （context 恒含路径非空，但保留 context 空则裸 text 的分支以防回归）。
+std::vector<std::string> expected_doc_inputs(const std::string& path,
+                                             const std::string& body) {
+    std::vector<std::string> out;
+    for (const auto& c : rag::chunk_document(path, body))
+        out.push_back(c.context.empty() ? c.text : c.context + "\n" + c.text);
+    return out;
+}
+
+std::string chunk_key(const rag::Chunk& c) {
+    return c.path + ":" + std::to_string(c.line_start) + "-"
+         + std::to_string(c.line_end);
+}
+
+const char* kDocA =
+    "# Alpha Guide\n\nThe installation requires the zephyr package.\n"
+    "Run the installer with default settings to finish setup.\n";
+const char* kDocB =
+    "# Beta Notes\n\nTroubleshooting the harbor service requires patience.\n"
+    "Check the harbor logs before restarting anything.\n";
+const char* kDocC =
+    "# Gamma Log\n\nThe quartz scheduler emits audit events nightly.\n"
+    "Rotate the quartz logs weekly to reclaim disk space.\n";
+
+}  // namespace
+
+TEST(EmbedIdentity, ComposesModelDialectAndRecipe) {
+    const std::string id = rag::embed_identity("nomic-embed-text");
+    // 构成式三段齐全：model、doc 前缀、输入拼法版本
+    EXPECT_NE(id.find("nomic-embed-text"), std::string::npos);
+    EXPECT_NE(id.find("search_document: "), std::string::npos);  // 方言=函数输出
+    EXPECT_NE(id.find(std::string{rag::kEmbedInputRecipe}), std::string::npos);
+    // 模型不同 → 身份不同：同维度不同向量空间不可混库（教材 v5 病历）
+    EXPECT_NE(rag::embed_identity("bge-m3"), id);
+    // 空模型 → 空身份（BM25-only 会话，缓存身份靠穿透语义保护）
+    EXPECT_TRUE(rag::embed_identity("").empty());
+}
+
+TEST(CorpusBuild, MissingOrEmptyRootGivesEmptyCorpus) {
+    FakeBackend be;
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+
+    // 不存在的目录：空 corpus，不报错
+    rag::Corpus c;
+    const auto stats = c.build(
+        fs::temp_directory_path() / "my_agent_rag_no_such_dir_42",
+        be.fn(), cfg);
+    EXPECT_EQ(stats.files_seen, 0u);
+    EXPECT_EQ(c.chunk_count(), 0u);
+    EXPECT_FALSE(c.has_embeddings());
+    EXPECT_TRUE(c.search("anything", be.fn(), cfg, 3).empty());
+
+    // 空目录同语义
+    TempDir dir;
+    rag::Corpus c2;
+    const auto stats2 = c2.build(dir.path(), be.fn(), cfg);
+    EXPECT_EQ(stats2.files_seen, 0u);
+    EXPECT_EQ(c2.chunk_count(), 0u);
+    EXPECT_TRUE(c2.search("anything", be.fn(), cfg, 3).empty());
+
+    EXPECT_EQ(be.calls, 0u);   // 空语料一次都不嵌
+}
+
+TEST(CorpusBuild, BuildsRecursesAndFiltersThenSearches) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "sub" / "c.md", kDocC);        // 递归子目录要收
+    write_file(dir.path() / "notes.txt", kDocB);           // 非 .md 不收
+    write_file(dir.path() / ".hidden" / "h.md", kDocB);    // 点目录不进
+
+    FakeBackend be;
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    rag::Corpus c;
+    const auto stats = c.build(dir.path(), be.fn(), cfg);
+
+    EXPECT_EQ(stats.files_seen, 2u);           // 只有 a.md 与 sub/c.md
+    EXPECT_EQ(stats.files_reused, 0u);         // 首建全量
+    EXPECT_EQ(stats.files_rechunked, 2u);
+    ASSERT_GT(c.chunk_count(), 0u);
+    ASSERT_TRUE(c.has_embeddings());
+    EXPECT_EQ(stats.chunks_embedded, c.chunk_count());
+    EXPECT_TRUE(stats.dense_ok);
+
+    // 块的 path 一律是相对 root 的路径（缓存按 rel_path 键控的前提）
+    for (const auto& ch : c.chunks())
+        EXPECT_TRUE(ch.path == "a.md" || ch.path == "sub/c.md")
+            << "非相对路径: " << ch.path;
+
+    // 主题词唯一 → 首命中即正确文档
+    const auto ha = c.search("zephyr", be.fn(), cfg, 3);
+    ASSERT_FALSE(ha.empty());
+    EXPECT_EQ(c.chunks()[ha[0].first].path, "a.md");
+    const auto hc = c.search("quartz", be.fn(), cfg, 3);
+    ASSERT_FALSE(hc.empty());
+    EXPECT_EQ(c.chunks()[hc[0].first].path, "sub/c.md");
+
+    // .txt 里的词在词法路上检索不到（未配模型 → 恒等降级 bm25_search，
+    // 空 BM25 命中 = 干净的扩展名过滤证据）
+    const rag::EmbedConfig bm25_cfg{};
+    EXPECT_TRUE(c.search("harbor", be.fn(), bm25_cfg, 3).empty());
+}
+
+TEST(CorpusCache, SecondBuildHitsCacheWithZeroEmbeds) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1;
+    rag::Corpus first;
+    const auto s1 = first.build(dir.path(), be1.fn(), cfg);
+    ASSERT_TRUE(s1.dense_ok);
+    ASSERT_GT(first.chunk_count(), 0u);
+    const auto total = first.chunk_count();
+    EXPECT_GT(be1.calls, 0u);
+    // 缓存已落盘
+    EXPECT_TRUE(fs::exists(dir.path() / std::string{rag::kCorpusCacheName}));
+
+    // 新实例同 root = 模拟进程重启（issue 验收口径）
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), cfg);
+    EXPECT_EQ(s2.files_seen, 2u);
+    EXPECT_EQ(s2.files_reused, 2u);       // 全命中
+    EXPECT_EQ(s2.files_rechunked, 0u);
+    EXPECT_EQ(s2.chunks_embedded, 0u);    // 零嵌入
+    EXPECT_EQ(be2.calls, 0u);             // backend 一次都没碰
+    ASSERT_TRUE(s2.dense_ok);             // 向量来自缓存搬运
+    EXPECT_EQ(second.chunk_count(), total);
+
+    // 缓存搬运没腐坏：同查询首命中同一块（按块身份比，不比 id）
+    for (const char* q : {"zephyr", "harbor"}) {
+        const auto h1 = first.search(q, be1.fn(), cfg, 3);
+        const auto h2 = second.search(q, be2.fn(), cfg, 3);
+        ASSERT_FALSE(h1.empty());
+        ASSERT_FALSE(h2.empty());
+        EXPECT_EQ(chunk_key(first.chunks()[h1[0].first]),
+                  chunk_key(second.chunks()[h2[0].first]));
+    }
+}
+
+TEST(CorpusCache, ChangedFileReembedsOnlyThatFile) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    write_file(dir.path() / "c.md", kDocC);
+
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1;
+    rag::Corpus first;
+    ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+
+    // 改 b.md：内容与长度都变（size+mtime 双指纹必然失配）
+    const std::string new_b =
+        "# Beta Notes\n\nTroubleshooting the lighthouse service is easier.\n"
+        "Consult the lighthouse manual for the restart procedure.\n";
+    write_file(dir.path() / "b.md", new_b);
+
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), cfg);
+    EXPECT_EQ(s2.files_reused, 2u);        // a.md、c.md 原样搬运
+    EXPECT_EQ(s2.files_rechunked, 1u);
+    ASSERT_TRUE(s2.dense_ok);
+
+    // 只有 b.md 的块进 backend —— 输入与「直接 chunk_document + 拼装」
+    // 逐条一致（多重集合比较：批量切分顺序无关紧要，条目必须恰好相等）
+    auto expected = expected_doc_inputs("b.md", new_b);
+    ASSERT_FALSE(expected.empty());
+    std::sort(expected.begin(), expected.end());
+    auto seen = be2.doc_inputs;
+    std::sort(seen.begin(), seen.end());
+    EXPECT_EQ(seen, expected);
+    EXPECT_EQ(s2.chunks_embedded, expected.size());
+
+    // 变更后的内容可检索（重建不是空转）
+    const auto hits = second.search("lighthouse", be2.fn(), cfg, 3);
+    ASSERT_FALSE(hits.empty());
+    EXPECT_EQ(second.chunks()[hits[0].first].path, "b.md");
+}
+
+TEST(CorpusCache, DeletedFileDropsItsChunks) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1;
+    rag::Corpus first;
+    ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+
+    fs::remove(dir.path() / "a.md");
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), cfg);
+    EXPECT_EQ(s2.files_seen, 1u);
+    EXPECT_EQ(s2.files_reused, 1u);
+    EXPECT_EQ(be2.calls, 0u);   // 无变更无嵌入
+    ASSERT_TRUE(s2.dense_ok);
+    ASSERT_GT(second.chunk_count(), 0u);
+    for (const auto& ch : second.chunks())
+        EXPECT_NE(ch.path, "a.md");   // 删除文件的块出局
+
+    // walk 是唯一事实：写回后的缓存里 a.md 也必须消失 ——
+    // 再来一个新实例（缓存重放）不该让它复活
+    rag::Corpus third;
+    third.build(dir.path(), be2.fn(), cfg);
+    for (const auto& ch : third.chunks())
+        EXPECT_NE(ch.path, "a.md");
+}
+
+TEST(CorpusCache, ModelSwitchReembedsAllVectorsButKeepsChunks) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    rag::EmbedConfig cfg1{.model = "m1"};
+    FakeBackend be1;
+    rag::Corpus first;
+    const auto s1 = first.build(dir.path(), be1.fn(), cfg1);
+    ASSERT_TRUE(s1.dense_ok);
+    const auto total = first.chunk_count();
+
+    // 换模型：同维度不同向量空间（教材 v5 病历），向量全废；块指纹与
+    // embed 无关 → 块仍复用（files_reused 不归零）
+    rag::EmbedConfig cfg2{.model = "m2"};
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), cfg2);
+    EXPECT_EQ(s2.files_reused, 2u);
+    EXPECT_EQ(s2.files_rechunked, 0u);
+    EXPECT_EQ(s2.chunks_embedded, total);   // 但向量全量重嵌
+    ASSERT_TRUE(s2.dense_ok);
+
+    // 新模型身份要落盘：第三次同模型 build 零嵌入
+    FakeBackend be3;
+    rag::Corpus third;
+    const auto s3 = third.build(dir.path(), be3.fn(), cfg2);
+    EXPECT_EQ(s3.files_reused, 2u);
+    EXPECT_EQ(s3.chunks_embedded, 0u);
+    EXPECT_EQ(be3.calls, 0u);
+}
+
+TEST(CorpusCache, ChunkerIdentityMismatchInvalidatesAll) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1;
+    rag::Corpus first;
+    ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+    const auto total = first.chunk_count();
+
+    // 篡改缓存里的 chunker 身份串：等长替换，结构仍合法、身份失配 ——
+    // (size,mtime) 指纹对此完全无感，只有身份闸能拦住
+    const fs::path cache = dir.path() / std::string{rag::kCorpusCacheName};
+    std::string blob = read_file(cache);
+    const std::string from{rag::kChunkerIdentity};
+    const std::string to = "chunker-vX";
+    ASSERT_EQ(from.size(), to.size());
+    const auto at = blob.find(from);
+    ASSERT_NE(at, std::string::npos);
+    blob.replace(at, from.size(), to);
+    write_file(cache, blob);
+
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), cfg);
+    EXPECT_EQ(s2.files_reused, 0u);          // 连块带向量整体当 miss
+    EXPECT_EQ(s2.files_rechunked, 2u);
+    EXPECT_EQ(s2.chunks_embedded, total);
+    ASSERT_TRUE(s2.dense_ok);
+    EXPECT_EQ(second.chunk_count(), total);  // 内容照常正确
+    const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
+    ASSERT_FALSE(hits.empty());
+    EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+}
+
+TEST(CorpusCache, CorruptCacheSilentlyRebuilds) {
+    // 三种损坏形态：垃圾头 / 头部截断 / 中段截断（写一半崩溃）
+    for (int mode = 0; mode < 3; ++mode) {
+        TempDir dir;
+        write_file(dir.path() / "a.md", kDocA);
+        write_file(dir.path() / "b.md", kDocB);
+        const rag::EmbedConfig cfg{.model = "fake-embed"};
+        FakeBackend be1;
+        rag::Corpus first;
+        ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+        const auto total = first.chunk_count();
+
+        const fs::path cache = dir.path() / std::string{rag::kCorpusCacheName};
+        std::string blob = read_file(cache);
+        ASSERT_FALSE(blob.empty());
+        switch (mode) {
+            case 0: blob.assign("\xde\xad\xbe\xef garbage"); break;  // 坏 magic
+            case 1: blob.resize(7); break;                    // 头都没读完
+            case 2: blob.resize(blob.size() / 2); break;      // 中段截断
+        }
+        write_file(cache, blob);
+
+        // 静默：不抛不崩，当 miss 全量重建，结果正确
+        FakeBackend be2;
+        rag::Corpus second;
+        const auto s2 = second.build(dir.path(), be2.fn(), cfg);
+        EXPECT_EQ(s2.files_reused, 0u);
+        EXPECT_EQ(s2.files_rechunked, 2u);
+        EXPECT_EQ(s2.chunks_embedded, total);
+        ASSERT_TRUE(s2.dense_ok);
+        EXPECT_EQ(second.chunk_count(), total);
+        const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
+        ASSERT_FALSE(hits.empty());
+        EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+    }
+}
+
+TEST(CorpusBuild, EmbedFailureDegradesToBm25AndKeepsCache) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1;
+    rag::Corpus first;
+    ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+
+    // b.md 变更 + 后端故障：有块要嵌但嵌不成
+    write_file(dir.path() / "b.md",
+               "# Beta Notes\n\nThe harbor service now uses the wharf "
+               "protocol and new ports.\n");
+    FakeBackend be_fail;
+    be_fail.fail = true;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be_fail.fn(), cfg);
+    EXPECT_FALSE(s2.dense_ok);               // 降级 BM25-only（不是错误）
+    EXPECT_FALSE(second.has_embeddings());   // 不交半截 dense
+    ASSERT_GT(second.chunk_count(), 0u);     // 块照常在，检索走词法路
+    const auto hits = second.search("zephyr", be_fail.fn(), cfg, 3);
+    ASSERT_FALSE(hits.empty());
+    EXPECT_EQ(second.chunks()[hits[0].first].path, "a.md");
+
+    // 失败会话不写缓存：旧缓存（a.md 带向量）原样保留 → 下次好后端
+    // build 时 a.md 零嵌入。若失败会话写了无向量缓存，a.md 也会被重嵌，
+    // 下面的多重集合比较就会多出 a.md 的输入 —— 计数钉不住的，输入钉得住
+    FakeBackend be3;
+    rag::Corpus third;
+    const auto s3 = third.build(dir.path(), be3.fn(), cfg);
+    ASSERT_TRUE(s3.dense_ok);
+    EXPECT_EQ(s3.files_reused, 1u);   // 只有 a.md
+    EXPECT_EQ(s3.files_rechunked, 1u);  // b.md（对缓存而言是变更）
+    std::vector<std::string> seen = be3.doc_inputs;
+    std::sort(seen.begin(), seen.end());
+    EXPECT_FALSE(seen.empty());
+    for (const auto& input : seen)
+        EXPECT_EQ(input.find("a.md"), std::string::npos) << "不该出现: " << input;
+}
+
+TEST(CorpusBuild, Bm25OnlySessionCarriesIdentityThrough) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    rag::EmbedConfig cfg{.model = "m1"};
+    FakeBackend be1;
+    rag::Corpus first;
+    ASSERT_TRUE(first.build(dir.path(), be1.fn(), cfg).dense_ok);
+
+    // BM25-only 会话（忘开 Ollama 的场景）：不嵌不清，向量与身份原样带过
+    rag::EmbedConfig no_model{};
+    FakeBackend be2;
+    rag::Corpus second;
+    const auto s2 = second.build(dir.path(), be2.fn(), no_model);
+    EXPECT_EQ(s2.files_reused, 2u);
+    EXPECT_EQ(s2.chunks_embedded, 0u);
+    EXPECT_EQ(be2.calls, 0u);
+    ASSERT_TRUE(second.has_embeddings());   // 缓存向量没有被丢
+
+    // 身份穿透：下次带同模型的会话直接命中，零嵌入。若身份被空 model
+    // 抹掉，这里会全量重嵌 —— 计数就不再是 0
+    FakeBackend be3;
+    rag::Corpus third;
+    const auto s3 = third.build(dir.path(), be3.fn(), cfg);
+    EXPECT_EQ(s3.files_reused, 2u);
+    EXPECT_EQ(s3.chunks_embedded, 0u);
+    EXPECT_EQ(be3.calls, 0u);
+}
+
+TEST(CorpusBuild, FromMemoryMatchesFolderBuild) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", kDocA);
+    write_file(dir.path() / "b.md", kDocB);
+    const rag::EmbedConfig cfg{.model = "fake-embed"};
+    FakeBackend be1, be2;
+    rag::Corpus from_dir;
+    const auto s1 = from_dir.build(dir.path(), be1.fn(), cfg);
+    ASSERT_TRUE(s1.dense_ok);
+
+    rag::Corpus from_mem;
+    const auto s2 =
+        from_mem.build_from_memory({{"a.md", kDocA}, {"b.md", kDocB}},
+                                   be2.fn(), cfg);
+    ASSERT_TRUE(s2.dense_ok);
+    EXPECT_EQ(from_mem.chunk_count(), from_dir.chunk_count());
+    EXPECT_EQ(s2.chunks_embedded, from_dir.chunk_count());  // 内存路无缓存
+    EXPECT_EQ(s2.files_reused, 0u);
+
+    // 检索行为一致：同查询命中序列按块身份逐一对应（chunk id 依赖
+    // 遍历顺序，不能直接比 id）
+    for (const char* q : {"zephyr", "harbor", "installer"}) {
+        const auto h1 = from_dir.search(q, be1.fn(), cfg, 3);
+        const auto h2 = from_mem.search(q, be2.fn(), cfg, 3);
+        ASSERT_EQ(h1.size(), h2.size());
+        for (std::size_t i = 0; i < h1.size(); ++i)
+            EXPECT_EQ(chunk_key(from_dir.chunks()[h1[i].first]),
+                      chunk_key(from_mem.chunks()[h2[i].first]))
+                << "query=" << q << " rank=" << i;
+    }
 }

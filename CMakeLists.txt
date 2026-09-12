@@ -988,6 +988,7 @@ gtest_discover_tests(
 add_library(
     my_agent_rag
     src/rag/bm25.cpp
+    src/rag/corpus.cpp
     src/rag/embed.cpp
     src/rag/hybrid.cpp
 )
