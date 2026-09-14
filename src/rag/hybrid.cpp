@@ -53,32 +53,22 @@ rrf_fuse(const std::vector<std::vector<std::uint32_t>>& ranked_lists, double k, 
     return out;
 }
 
-// mode 恒报 Bm25Only —— 三条降级路径这样恰好是对的，融合路径错。
-// Green = 把「两路都活着且走到 rrf_fuse」的 return 改报 Hybrid
-// （模式测试 Red 在 rag_test 的 SearchMode 一节）。
 SearchResult
 hybrid_search(const Bm25Index& bm25, const DenseIndex& dense,
               std::string_view query, const EmbedBackend& backend,
               const EmbedConfig& cfg, std::size_t k) {
-    // 降级判定先于任何 backend 调用：dense 空 / 未配模型 → 纯词法路。
-    // （查询向量化一次都不做 —— 那是纯浪费）
     if (dense.vecs.empty() || cfg.model.empty())
         return {bm25_search(bm25, query, k), SearchMode::Bm25Only};
 
-    // 查询向量化一次（Query 角色）；失败/形状不对 → 该查询降级
     auto qv = backend(cfg, {std::string{query}}, EmbedRole::Query);
     if (!qv || qv->size() != 1)
         return {bm25_search(bm25, query, k), SearchMode::Bm25Only};
     const std::vector<float>& qvec = (*qv)[0];
 
-    // 「retrieve wide, fuse, return narrow」：两路各拉 pool 深，融合后裁 k。
-    // pool 深于 k —— 深位候选带着 1/(k+rank) 进场，两路叠加后可能反超
     const std::size_t pool = std::max<std::size_t>(k * 8, 32);
 
-    // 词法路（pool 深，分数对 RRF 是冗余 → ranked_ids 剥掉）
     const auto bm25_hits = bm25_search(bm25, query, pool);
 
-    // 语义路：cosine 线性扫全库，只收 > 0（零 = 无信号/维度腐烂，负 = 反义）
     std::vector<std::pair<std::uint32_t, double>> dense_scored;
     dense_scored.reserve(dense.vecs.size());
     for (std::uint32_t id = 0; id < dense.vecs.size(); ++id) {
@@ -96,7 +86,7 @@ hybrid_search(const Bm25Index& bm25, const DenseIndex& dense,
     // 返回原始 BM25 分而非 RRF 分 —— 降级要恒等，不要「差不多」
     if (dense_scored.empty()) {
         auto hits = bm25_hits;
-        if (hits.size() > k) hits.resize(k);   // 裁前 k 条 ≡ bm25_search(k)
+        if (hits.size() > k) hits.resize(k);
         return {std::move(hits), SearchMode::Bm25Only};
     }
 

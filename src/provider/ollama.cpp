@@ -8,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <variant>
 
 namespace my_agent::provider::ollama {
 namespace {

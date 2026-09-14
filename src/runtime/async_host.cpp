@@ -88,7 +88,6 @@ namespace my_agent{
 
     void AsyncHost::drain_inbox()
     {
-        // 只交换一次稳定批次
         std::vector<Msg> batch = inbox_->drain();
         for(Msg& msg:batch){
             process_msg(std::move(msg));
@@ -97,10 +96,6 @@ namespace my_agent{
 
     bool AsyncHost::is_quiescent() const noexcept
     {
-        // Idle：回合已结束。AwaitingPermission：等的是 owner 自己的审批输入，
-        // 没有 in-flight worker 会送来消息，继续 wait 只会挂死。
-        // Streaming / ExecutingTool：必然有 worker 在飞，phase 本身就是
-        // in-flight 计数器，所以不需要额外的计数器。
         return std::holds_alternative<Idle>(current_model_.phase)
             || std::holds_alternative<AwaitingPermission>(current_model_.phase);
     }
@@ -112,8 +107,6 @@ namespace my_agent{
                 return;
             }
 
-            // 先 drain 再 wait：唤醒是电平合并的，进入 wait 之前先把已到达的
-            // 消息全部消费掉，否则"消息已在 Inbox 但唤醒已被消费"会挂死。
             drain_inbox();
 
             if (is_quiescent()) {
@@ -249,5 +242,4 @@ namespace my_agent{
             }
         );
     }
-
 }

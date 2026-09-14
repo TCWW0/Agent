@@ -18,7 +18,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <utility>
 #include <filesystem>
 #include <vector>
 
@@ -233,12 +232,8 @@ ToolDef make_search_docs_tool() {
             {"required", nlohmann::json::array({"query"})},
             {"additionalProperties", false},
         },
-        // 诚实全声明（#43 拍板）：读文档 + 缓存文件写进 docs 根 +
-        // 配了 embed 模型时打 localhost。默认 profile=Write 全放行。
         .effects = {Effect::ReadFs, Effect::WriteFs, Effect::Net},
         .execute = [](const nlohmann::json& args) -> ExecResult {
-            // 进程级状态：与 registry 同寿命。配置不缓存 —— env 会话中
-            // 可变，每次调用现场解析。
             static DocsIndex index;
             const DocsConfig cfg = resolve_config(
                 [](const char* name) { return std::getenv(name); },
