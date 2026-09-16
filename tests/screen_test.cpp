@@ -53,8 +53,9 @@ TEST(ScreenTest, SeparatesTranscriptContentFromDockChrome)
     my_agent::ui::UiState ui;
     ui.input = "draft";
 
+    const maya::Theme theme;
     const my_agent::ui::ScreenConfig screen =
-        my_agent::ui::project_screen(model, ui);
+        my_agent::ui::project_screen(model, ui, theme);
 
     // transcript 侧：对话历史在场，且不含 dock 的半截输入。
     ASSERT_EQ(1u, screen.transcript.turns.size());

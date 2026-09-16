@@ -15,6 +15,7 @@
 
 #include <optional>
 
+#include <maya/style/theme.hpp>
 #include <maya/widget/composer.hpp>
 #include <maya/widget/conversation.hpp>
 #include <maya/widget/permission.hpp>
@@ -39,8 +40,11 @@ struct ScreenConfig {
     DockConfig dock;
 };
 
-// Model + UiState → 语义屏幕的投影。纯函数。
+// Model + UiState → 语义屏幕的投影。纯函数。配色走 Theme（语义色 →
+// 实际色的解析在投影内完成），主题由调用方注入 —— 与旧链路
+// to_maya_element(frame, theme) 同一条纪律：颜色策略从正门进来。
 [[nodiscard]]
-ScreenConfig project_screen(const Model& model, const UiState& ui);
+ScreenConfig project_screen(
+    const Model& model, const UiState& ui, const maya::Theme& theme);
 
 }  // namespace my_agent::ui
