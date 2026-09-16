@@ -813,6 +813,49 @@ gtest_discover_tests(
     TEST_PREFIX "maya_projection."
 )
 
+# 语义屏幕（issue #26）：Model + UiState → maya widget Config 的纯投影。
+# transcript 与 dock 在结构上分离；视觉来自 maya 现成 widget，
+# dock 的组合语义归本项目。自有 Frame IR 的逐片退役由此开始。
+add_library(
+    my_agent_ui_screen
+    src/ui/screen.cpp
+)
+
+target_include_directories(
+    my_agent_ui_screen
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_ui_screen
+    PUBLIC cxx_std_26
+)
+
+target_link_libraries(
+    my_agent_ui_screen
+    PUBLIC
+        my_agent_ui_view
+        maya
+)
+
+add_executable(
+    screen_test
+    tests/screen_test.cpp
+)
+
+target_link_libraries(
+    screen_test
+    PRIVATE
+        my_agent_ui_screen
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    screen_test
+    TEST_PREFIX "screen."
+)
+
 # TUI 事件循环：apply_key 是纯的（按键 -> UiState 变更 + 可选 Msg），
 # run_ui 才碰 poll 与终端。分开是为了让按键语义脱离 tty 可测。
 add_library(
