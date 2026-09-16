@@ -315,4 +315,10 @@ std::vector<std::string> VirtualTerminal::screen() const
     return rows;
 }
 
+bool VirtualTerminal::cell_blank(int row, int column) const
+{
+    const std::vector<Cell>& line = grid_.at(static_cast<std::size_t>(row));
+    return line.at(static_cast<std::size_t>(column)).text.empty();
+}
+
 }  // namespace my_agent::test

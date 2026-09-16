@@ -13,6 +13,14 @@
 
 namespace my_agent::ui {
 
+// Red 桩（issue #26 红 2）：签名与布局契约已定（见 screen.hpp），
+// Element 构造待 Green 实现。默认构造的 Element 渲染零内容 —— 锚点行
+// 全找不到，布局测试应当红。
+maya::Element dock_element(const DockConfig& /*dock*/)
+{
+    return {};
+}
+
 namespace {
 
 maya::Composer::State composer_state(const Model& model)

@@ -39,6 +39,10 @@ public:
     // 当前屏幕内容，每行一个字符串（行尾空白已去掉）。
     [[nodiscard]] std::vector<std::string> screen() const;
 
+    // 指定格是否空白（宽字符的续格也算占用格）。按列断言 gutter / 边缘
+    // 空白用：screen() 已把行尾空白裁掉，字节串答不了「第 N 列是什么」。
+    [[nodiscard]] bool cell_blank(int row, int column) const;
+
     // 遇到过的未实现序列，原样记下以便探针断言它是空的。
     [[nodiscard]] const std::vector<std::string>& unhandled() const noexcept
     {

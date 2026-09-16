@@ -856,6 +856,26 @@ gtest_discover_tests(
     TEST_PREFIX "screen."
 )
 
+# dock 布局（issue #26 红 2）：DockConfig → Element → FrameBuffer →
+# VirtualTerminal 网格。布局语义只在渲染后存在，断言钉在网格层。
+add_executable(
+    dock_layout_test
+    tests/dock_layout_test.cpp
+)
+
+target_link_libraries(
+    dock_layout_test
+    PRIVATE
+        my_agent_ui_screen
+        my_agent_virtual_terminal
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    dock_layout_test
+    TEST_PREFIX "dock_layout."
+)
+
 # TUI 事件循环：apply_key 是纯的（按键 -> UiState 变更 + 可选 Msg），
 # run_ui 才碰 poll 与终端。分开是为了让按键语义脱离 tty 可测。
 add_library(

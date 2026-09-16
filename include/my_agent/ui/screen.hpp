@@ -15,6 +15,7 @@
 
 #include <optional>
 
+#include <maya/element/element.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/composer.hpp>
 #include <maya/widget/conversation.hpp>
@@ -46,5 +47,13 @@ struct ScreenConfig {
 [[nodiscard]]
 ScreenConfig project_screen(
     const Model& model, const UiState& ui, const maya::Theme& theme);
+
+// dock 的布局翻译：DockConfig → maya::Element。布局契约（issue #26 验收 2）：
+// permission slot（如有）居顶；composer 上方恰好一空行；composer 紧贴
+// status 上方；status 之下不画任何行；左右各一列 gutter。
+// transcript 的布局与整屏贴底策略不在此层 —— 全屏 adapter（terminal.cpp）
+// 持有它们，本函数只对 dock 自身的内部规则负责。
+[[nodiscard]]
+maya::Element dock_element(const DockConfig& dock);
 
 }  // namespace my_agent::ui
