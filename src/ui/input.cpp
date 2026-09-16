@@ -80,12 +80,40 @@ std::optional<Key::Kind> escape_kind(std::string_view sequence) noexcept
     return std::nullopt;
 }
 
+// Escape sequence parsing:
+//
+//                         ESC (0x1B)
+//                              │
+//                              ▼
+//                           Escape
+//                              │
+//               ┌──────────────┼──────────────┐
+//               │              │              │
+//              'O'            '['           other
+//               │              │              │
+//               ▼              ▼              ▼
+//             SS3             CSI        consume 2 bytes
+//               │              │          (unsupported,TODO)
+//               │              │
+//               │              └── scan until final byte
+//               │                  (0x40 <= byte <= 0x7E)
+//               │                         │
+//               │                         ▼
+//               │                  consume whole sequence
+//               │
+//               └── consume fixed 3 bytes
+//                   ESC O <key>
+//
+// Incomplete sequence:
+//     consumed == 0 → keep buffer intact and wait for next feed().
 [[nodiscard]]
 EscapeResult decode_escape(std::string_view text) noexcept
 {
     if (text.size() < 2) {
         return {};
     }
+    // TODO(#44): the 2-byte consume is right for Alt+<ascii>, but it also eats
+    // the lead byte of a multibyte character typed right after Esc.
     if (text[1] != '[' && text[1] != 'O') {
         return EscapeResult{.consumed = 2};
     }
