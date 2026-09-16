@@ -15,8 +15,11 @@ namespace {
 constexpr int kColumns = 40;
 constexpr int kRows = 12;
 // 哨兵：composer 半截输入与 status 相位各自唯一可寻的锚点。
+// 约束：verb 哨兵 ≤ 10 列 —— maya StatusBar 的 verb 槽固定 verb_width=10，
+// 超长 verb 会被削成 9 列 + …（测宽降级），哨兵就找不到了；
+// 且两个哨兵互不为子串 —— find_row_containing 按子串匹配，重叠会错锚。
 constexpr const char* kDraft = "DRAFT7F3A";
-constexpr const char* kVerb = "thinking7F3A";
+constexpr const char* kVerb = "VERB9C31";
 
 [[nodiscard]]
 int find_row_containing(
@@ -78,10 +81,18 @@ TEST(DockLayoutTest, ComposerSitsDirectlyAboveStatusInsideAGutter)
     ASSERT_GE(draft_row, 0) << bytes;
     ASSERT_GE(status_row, 0) << bytes;
     ASSERT_LT(composer_top, composer_bottom) << bytes;
-    ASSERT_LE(composer_bottom, draft_row) << bytes;
+    // draft 在 composer 盒内：顶框之下、底框之上（正文行是盒的一部分）。
+    ASSERT_LE(composer_top, draft_row) << bytes;
+    ASSERT_LE(draft_row, composer_bottom) << bytes;
 
-    // 1. composer 紧贴 status：底框的下一行就是相位行，中间没有空行。
-    EXPECT_EQ(status_row, composer_bottom + 1);
+    // 1. composer 紧贴 status：底框与相位行之间不允许出现空行
+    //    （status 区自身可以多行 —— 顶条/chip/底条 —— 但那是它的内容，
+    //    不是间隔；断言钉「无空行」，不钉 status 的内部结构）。
+    ASSERT_GT(status_row, composer_bottom) << bytes;
+    for (int row = composer_bottom + 1; row < status_row; ++row) {
+        EXPECT_FALSE(row_is_blank(screen[row]))
+            << "blank row between composer and status at row " << row;
+    }
 
     // 2. composer 上方恰好一空行；这行之上 dock 无内容（dock 从呼吸行开始）。
     ASSERT_GT(composer_top, 0) << bytes;
@@ -92,14 +103,24 @@ TEST(DockLayoutTest, ComposerSitsDirectlyAboveStatusInsideAGutter)
             << "row " << row << " above the breathing blank is not blank";
     }
 
-    // 3. status 之下不画任何行：以下全是空白。
+    // 3. status 之下不画任何行：status 区允许自身多行，但一旦出现空行，
+    //    之后不得再出现内容（「空行之后有内容」= 在 status 下面画了东西）。
+    bool blank_after_status = false;
     for (int row = status_row + 1; row < kRows; ++row) {
-        EXPECT_TRUE(row_is_blank(screen[row]))
-            << "row " << row << " below status must be blank";
+        if (row_is_blank(screen[row])) {
+            blank_after_status = true;
+        } else {
+            EXPECT_FALSE(blank_after_status)
+                << "content at row " << row
+                << " appears after a blank row below status";
+        }
     }
 
-    // 4. 一列 gutter：dock 的每个非空行，左右边缘列都是空白格。
-    for (int row = composer_top; row <= status_row; ++row) {
+    // 4. 一列 gutter：屏幕上每个非空行，左右边缘列都是空白格。
+    for (int row = 0; row < kRows; ++row) {
+        if (row_is_blank(screen[row])) {
+            continue;
+        }
         EXPECT_TRUE(terminal.cell_blank(row, 0))
             << "left gutter missing on row " << row;
         EXPECT_TRUE(terminal.cell_blank(row, kColumns - 1))

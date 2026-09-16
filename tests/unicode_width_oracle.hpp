@@ -26,6 +26,21 @@ inline int oracle_char_width(char32_t code_point) noexcept
     if (code_point >= 0x20 && code_point < 0x7F) {
         return 1;
     }
+    // Dock chrome 字形（issue #26 起 maya widget 输出）：
+    //   Box Drawing（U+2500..257F：─│╭╮╰╯┊…）、Block Elements
+    //   （U+2580..259F：█▌…，自绘光标的字形区）、·（U+00B7 hint 分隔）、
+    //   ↵⇧⌥（U+21B5/21E7/2325，hint row 键位字形）、❯（U+276F prompt）、
+    //   …（U+2026 省略号，placeholder 字形）。
+    // EastAsianWidth-16.0.0 里均为 N 或 A（个别），宽 1 —— 与生产侧
+    // 「不在宽表即 1 列」一致。收录理由同既有条目：帧字节真实出现。
+    if ((code_point >= 0x2500 && code_point <= 0x257F)
+        || (code_point >= 0x2580 && code_point <= 0x259F)
+        || code_point == 0x00B7 || code_point == 0x2026
+        || code_point == 0x21B5
+        || code_point == 0x21E7 || code_point == 0x2325
+        || code_point == 0x276F) {
+        return 1;
+    }
     struct Wide {
         char32_t first;
         char32_t last;

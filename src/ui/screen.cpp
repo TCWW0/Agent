@@ -13,12 +13,22 @@
 
 namespace my_agent::ui {
 
-// Red 桩（issue #26 红 2）：签名与布局契约已定（见 screen.hpp），
-// Element 构造待 Green 实现。默认构造的 Element 渲染零内容 —— 锚点行
-// 全找不到，布局测试应当红。
-maya::Element dock_element(const DockConfig& /*dock*/)
+maya::Element dock_element(const DockConfig& dock)
 {
-    return {};
+    using namespace maya::dsl;
+
+    std::vector<maya::Element> rows;
+    if (dock.permission) {
+        // 权限请求居顶：它是 dock 里优先级最高的内容 ——
+        // 用户必须先响应它，composer 的输入语义整个随它改变。
+        rows.push_back(maya::Permission{*dock.permission}.build());
+    }
+    rows.push_back(blank().build());  // composer 上方的呼吸行
+    rows.push_back(maya::Composer{dock.composer}.build());
+    rows.push_back(maya::StatusBar{dock.status}.build());
+    // 一列水平 gutter：dock 自身的边界声明，不是边框盒 ——
+    // 边框属于 composer 自己（它的圆角盒），gutter 属于 dock 整体。
+    return (v(std::move(rows)) | padding(0, 1)).build();
 }
 
 namespace {
