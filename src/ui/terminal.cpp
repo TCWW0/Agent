@@ -1,9 +1,14 @@
 #include "my_agent/ui/terminal.hpp"
 
 #include "my_agent/ui/maya_projection.hpp"
+#include "my_agent/ui/screen.hpp"
 
+#include <maya/dsl.hpp>
+#include <maya/core/scroll_state.hpp>
+#include <maya/element/builder.hpp>
 #include <maya/render/frame.hpp>
 #include <maya/style/theme.hpp>
+#include <maya/widget/conversation.hpp>
 
 #include <atomic>
 #include <algorithm>
@@ -86,7 +91,8 @@ TerminalDriver::TerminalDriver(int input_fd, int output_fd)
       // 两端都必须是 tty。只有输出是 tty 时（`cat file | my_agent`）改不了输入的
       // termios，读键盘的那套逻辑无从工作，只能整体回退。
       is_tty_{::isatty(input_fd) == 1 && ::isatty(output_fd) == 1},
-      framebuffer_{std::make_unique<maya::FrameBuffer>()}
+      framebuffer_{std::make_unique<maya::FrameBuffer>()},
+      transcript_scroll_{std::make_unique<maya::ScrollState>()}
 {
     if (!is_tty_) {
         return;
@@ -167,6 +173,71 @@ bool TerminalDriver::render(const Frame& frame) noexcept
         // Maya render() does not swap buffers. Skipping commit on write failure
         // keeps front_ aligned with the terminal's last successful frame, so
         // the next render produces a complete diff instead of losing content.
+        return false;
+    }
+    framebuffer_->commit();
+    return true;
+}
+
+bool TerminalDriver::render(const ScreenConfig& screen) noexcept
+{
+    const Size current_size = size();
+    if (framebuffer_->width() != current_size.columns
+        || framebuffer_->height() != current_size.rows) {
+        framebuffer_->resize(current_size.columns, current_size.rows);
+    }
+
+    // Composer 使用应用绘制的 SolidCell caret；硬件光标继续隐藏，避免同屏双光标。
+    framebuffer_->set_cursor_visible(false);
+
+    const bool follow_tail = transcript_scroll_->at_bottom();
+    const auto build_screen = [&]() {
+        using namespace maya::dsl;
+
+        // agentty 的 Conversation 在 Inline 模式下靠自然高度进入终端 scrollback；
+        // 本项目保留备用屏，因此对应物是一个固定 viewport：Conversation 在 scrolly
+        // 内按自然高度布局，pane 吸收 dock 之外的剩余高度，dock 则禁止收缩。
+        maya::Element conversation = (
+            maya::Conversation{screen.transcript}.build()
+                | width(current_size.columns)
+        ).build();
+        maya::Element scroll_content = v(std::move(conversation)).build();
+        maya::Element transcript = maya::detail::vstack()
+            .grow(1.0f)
+            .shrink(1.0f)
+            .min_height(maya::Dimension::fixed(0))
+            .overflow(maya::Overflow::Hidden)
+            (std::move(scroll_content)
+                | scrolly(*transcript_scroll_, 0)
+                | grow(1.0f));
+
+        return maya::detail::vstack()
+            .width(maya::Dimension::fixed(current_size.columns))
+            .height(maya::Dimension::fixed(current_size.rows))
+            .overflow(maya::Overflow::Hidden)
+            (
+                std::move(transcript),
+                // 与 agentty 的 AppLayout 一样，让父级 cross-axis stretch
+                // 分配可用宽度。根节点已经给出整屏宽度，dock 只声明自己的
+                // 左右 gutter；这里不重复制造第二份宽度边界。
+                dock_element(screen.dock)
+                    | shrink(0.0f)
+            );
+    };
+
+    const maya::Theme& theme = maya::theme::dark;
+    maya::Element element = build_screen();
+    const std::string* bytes = &framebuffer_->render(element, theme);
+
+    // 第一次 paint 会把新的 max_y 写回 ScrollState。用户原本位于末尾时，内容增长
+    // 后立即跟随到新末尾并重建一次树；否则尊重未来的手动回看位置。
+    if (follow_tail && !transcript_scroll_->at_bottom()) {
+        transcript_scroll_->scroll_to_bottom();
+        element = build_screen();
+        bytes = &framebuffer_->render(element, theme);
+    }
+
+    if (!write_all(output_fd_, *bytes)) {
         return false;
     }
     framebuffer_->commit();

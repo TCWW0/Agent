@@ -2,7 +2,10 @@
 #include "virtual_terminal.hpp"
 
 #include <maya/render/frame.hpp>
+#include <maya/core/scroll_state.hpp>
+#include <maya/dsl.hpp>
 #include <maya/style/theme.hpp>
+#include <maya/widget/conversation.hpp>
 
 #include <gtest/gtest.h>
 
@@ -58,6 +61,7 @@ TEST(DockLayoutTest, ComposerSitsDirectlyAboveStatusInsideAGutter)
 {
     my_agent::ui::DockConfig dock;
     dock.composer.text = kDraft;
+    dock.status.phase.glyph = "*";
     dock.status.phase.verb = kVerb;
 
     maya::FrameBuffer framebuffer{kColumns, kRows};
@@ -84,6 +88,11 @@ TEST(DockLayoutTest, ComposerSitsDirectlyAboveStatusInsideAGutter)
     // draft 在 composer 盒内：顶框之下、底框之上（正文行是盒的一部分）。
     ASSERT_LE(composer_top, draft_row) << bytes;
     ASSERT_LE(draft_row, composer_bottom) << bytes;
+
+    // 圆角盒必须在右 gutter 之前闭合。此前只断言最右列为空，无法区分
+    // “正确留出 gutter”与“右边框整列没有画出”这两种屏幕。
+    EXPECT_EQ("╮", terminal.cell_text(composer_top, kColumns - 2)) << bytes;
+    EXPECT_EQ("╯", terminal.cell_text(composer_bottom, kColumns - 2)) << bytes;
 
     // 1. composer 紧贴 status：底框与相位行之间不允许出现空行
     //    （status 区自身可以多行 —— 顶条/chip/底条 —— 但那是它的内容，
@@ -126,4 +135,56 @@ TEST(DockLayoutTest, ComposerSitsDirectlyAboveStatusInsideAGutter)
         EXPECT_TRUE(terminal.cell_blank(row, kColumns - 1))
             << "right gutter missing on row " << row;
     }
+}
+
+// 全屏 adapter 会把同一个 dock 放在一个定高、裁剪的根列中。这个父级不能改变
+// dock 的水平布局契约：右 gutter 前一格仍须是 Composer 的闭合边框。
+TEST(DockLayoutTest, FullscreenParentKeepsComposerRightBorderClosed)
+{
+    using namespace maya::dsl;
+
+    my_agent::ui::DockConfig dock;
+    dock.composer.text = kDraft;
+    dock.status.phase.glyph = "*";
+    dock.status.phase.verb = kVerb;
+
+    maya::ScrollState scroll;
+    maya::Conversation::Config conversation_config;
+    conversation_config.fill_available_height = false;
+    maya::Element conversation = (
+        maya::Conversation{std::move(conversation_config)}.build()
+            | width(kColumns)
+    ).build();
+    maya::Element transcript = maya::detail::vstack()
+        .grow(1.0f)
+        .shrink(1.0f)
+        .min_height(maya::Dimension::fixed(0))
+        .overflow(maya::Overflow::Hidden)
+        (v(std::move(conversation)).build()
+            | scrolly(scroll, 0)
+            | grow(1.0f));
+
+    maya::Element root = maya::detail::vstack()
+        .width(maya::Dimension::fixed(kColumns))
+        .height(maya::Dimension::fixed(kRows))
+        .overflow(maya::Overflow::Hidden)
+        (
+            std::move(transcript),
+            my_agent::ui::dock_element(dock) | shrink(0.0f)
+        );
+
+    maya::FrameBuffer framebuffer{kColumns, kRows};
+    const std::string& bytes = framebuffer.render(root, maya::theme::dark);
+    my_agent::test::VirtualTerminal terminal{kColumns, kRows};
+    terminal.feed(bytes);
+    ASSERT_TRUE(terminal.unhandled().empty())
+        << "Unhandled sequence: " << terminal.unhandled().front();
+
+    const auto screen = terminal.screen();
+    const int composer_top = find_row_containing(screen, "╭");
+    const int composer_bottom = find_row_containing(screen, "╰");
+    ASSERT_GE(composer_top, 0) << bytes;
+    ASSERT_GE(composer_bottom, 0) << bytes;
+    EXPECT_EQ("╮", terminal.cell_text(composer_top, kColumns - 2)) << bytes;
+    EXPECT_EQ("╯", terminal.cell_text(composer_bottom, kColumns - 2)) << bytes;
 }

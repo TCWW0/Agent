@@ -1,6 +1,6 @@
 #pragma once
 
-#include "my_agent/ui/view.hpp"
+#include "my_agent/ui/screen.hpp"
 
 #include <memory>
 #include <string>
@@ -10,6 +10,7 @@
 
 namespace maya {
 class FrameBuffer;
+struct ScrollState;
 }  // namespace maya
 
 namespace my_agent::ui {
@@ -53,6 +54,11 @@ public:
     [[nodiscard]]
     bool render(const Frame& frame) noexcept;
 
+    // 新语义屏幕的运行时入口。ScreenConfig 已经把 transcript 与 dock 分开；
+    // 驱动只负责整屏组合、终端尺寸以及 write/commit 边界。
+    [[nodiscard]]
+    bool render(const ScreenConfig& screen) noexcept;
+
     // 查询终端尺寸。失败时返回 80x24 —— 管道里没有尺寸，但仍需要一个宽度来折行。
     [[nodiscard]]
     Size size() const noexcept;
@@ -69,6 +75,7 @@ private:
     // 进入 raw mode 之前的 termios，析构时原样写回。
     termios saved_termios_{};
     std::unique_ptr<maya::FrameBuffer> framebuffer_;
+    std::unique_ptr<maya::ScrollState> transcript_scroll_;
 };
 
 }  // namespace my_agent::ui

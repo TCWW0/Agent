@@ -1138,6 +1138,7 @@ target_link_libraries(
     my_agent_ui_terminal
     PUBLIC
         my_agent_ui_maya
+        my_agent_ui_screen
 )
 
 add_executable(

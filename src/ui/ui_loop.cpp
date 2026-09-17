@@ -3,6 +3,9 @@
 #include "my_agent/ui/input_editor.hpp"
 #include "my_agent/ui/repaint_clock.hpp"
 #include "my_agent/ui/resize_watch.hpp"
+#include "my_agent/ui/screen.hpp"
+
+#include <maya/style/theme.hpp>
 
 #include <cerrno>
 #include <chrono>
@@ -102,7 +105,6 @@ bool run_ui(
     }
 
     UiState ui;
-    MarkdownState markdown_state;
     InputDecoder decoder;
     RepaintClock clock{kFramesPerSecond};
     // 作用域绑在循环上：处理器随 run_ui 返回而摘掉，不给非 tty 回退路径留残留。
@@ -118,7 +120,7 @@ bool run_ui(
     static_cast<void>(clock.should_paint(RepaintClock::Clock::now()));
     refresh_status();
     static_cast<void>(terminal.render(
-        view(host.model(), ui, terminal.size(), markdown_state)
+        project_screen(host.model(), ui, maya::theme::dark)
     ));
 
     const int wake_fd = host.wake_fd();
@@ -139,7 +141,7 @@ bool run_ui(
         if (clock.should_paint(RepaintClock::Clock::now())) {
             refresh_status();
             static_cast<void>(terminal.render(
-                view(host.model(), ui, terminal.size(), markdown_state)
+                project_screen(host.model(), ui, maya::theme::dark)
             ));
         }
 

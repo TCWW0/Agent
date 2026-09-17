@@ -1,5 +1,6 @@
 #include "my_agent/ui/ui_loop.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -499,7 +500,8 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
             }
         }
     }
-    ASSERT_NE(std::string::npos, seen.find(wide_text)) << "80 列下这段本该在一行里";
+    ASSERT_NE(std::string::npos, seen.find(wide_text))
+        << "80 列下这段本该在一行里: " << seen;
 
     // 变窄，然后只发 SIGWINCH —— 不碰键盘。内核只把这个信号发给 pty 的前台进程组，
     // 测试进程不在其中，所以由测试自己 raise：要证明的是「信号到达后屏幕重排」，
@@ -509,10 +511,10 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
     std::string after;
     ASSERT_EQ(0, ::raise(SIGWINCH));
 
-    const std::string narrow_line(18, 'A');  // 20 columns minus the input prompt
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < deadline
-           && after.find(narrow_line) == std::string::npos) {
+           && static_cast<std::size_t>(std::count(after.begin(), after.end(), 'A'))
+               < wide_text.size()) {
         pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
         if (::poll(&probe, 1, 200) > 0) {
             char buffer[4096];
@@ -523,8 +525,10 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
         }
     }
 
-    EXPECT_NE(std::string::npos, after.find(narrow_line))
-        << "变窄后必须按新宽度重排，而不是等到下一次按键";
+    EXPECT_EQ(
+        wide_text.size(),
+        static_cast<std::size_t>(std::count(after.begin(), after.end(), 'A'))
+    ) << "变窄后必须完整重排全部内容，而不是横向裁掉或等待下一次按键";
     EXPECT_EQ(std::string::npos, after.find(wide_text))
         << "旧宽度的整行不该再出现在重排后的帧里";
 
@@ -630,7 +634,8 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
     const std::string typed = "request approval\r";
     EXPECT_EQ(static_cast<ssize_t>(typed.size()),
               ::write(primary, typed.data(), typed.size()));
-    EXPECT_TRUE(read_until("allow read"));
+    EXPECT_TRUE(read_until("effect=read_fs"));
+    EXPECT_NE(std::string::npos, seen.find("Permission Required"));
     EXPECT_NE(std::string::npos, seen.find("effect=read_fs"));
     EXPECT_NE(std::string::npos, seen.find(kArgumentSentinel));
 
@@ -731,7 +736,8 @@ TEST(UiLoopTest, RejectsARealToolCallThroughThePtyWithoutExecutingIt)
     const std::string typed = "request rejection\r";
     EXPECT_EQ(static_cast<ssize_t>(typed.size()),
               ::write(primary, typed.data(), typed.size()));
-    EXPECT_TRUE(read_until("allow read"));
+    EXPECT_TRUE(read_until("effect=read_fs"));
+    EXPECT_NE(std::string::npos, seen.find("Permission Required"));
     EXPECT_NE(std::string::npos, seen.find(kArgumentSentinel));
 
     const char reject = 'n';
