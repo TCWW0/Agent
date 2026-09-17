@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <optional>
 
 namespace my_agent::test {
 
@@ -15,6 +16,38 @@ struct Decoded {
     char32_t code_point;
     std::size_t size;
 };
+
+// SGR 的参数表。空参数串按 ECMA-48 等价于单个 0（重置）。返回 nullopt
+// 表示参数不是纯数字分段（例如冒号分隔的 4:3）—— 那就是没建模的形态。
+[[nodiscard]]
+std::optional<std::vector<int>> sgr_parameters(std::string_view params)
+{
+    std::vector<int> list;
+    if (params.empty()) {
+        list.push_back(0);
+        return list;
+    }
+    std::size_t at = 0;
+    while (true) {
+        const std::size_t separator = params.find(';', at);
+        const std::string_view piece = params.substr(
+            at, separator == std::string_view::npos ? std::string_view::npos
+                                                    : separator - at
+        );
+        int value = 0;
+        if (!piece.empty()) {
+            if (std::from_chars(piece.data(), piece.data() + piece.size(), value).ec
+                != std::errc{}) {
+                return std::nullopt;
+            }
+        }
+        list.push_back(value);
+        if (separator == std::string_view::npos) {
+            return list;
+        }
+        at = separator + 1;
+    }
+}
 
 [[nodiscard]]
 Decoded decode(std::string_view text) noexcept
@@ -110,9 +143,13 @@ void VirtualTerminal::put(char32_t code_point, int width)
         row[column].text.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
     }
     row[column].continuation = false;
+    row[column].style = current_style_;
     if (width == 2 && column + 1 < static_cast<std::size_t>(columns_)) {
         row[column + 1].text.clear();
         row[column + 1].continuation = true;
+        // 续格与首格是同一笔画出来的：样式必须同源，否则「宽字符宽度」
+        // 这类按格比较的断言会在两格上读到不同的样式。
+        row[column + 1].style = current_style_;
     }
 
     cursor_column_ += width;
@@ -130,19 +167,155 @@ void VirtualTerminal::put(char32_t code_point, int width)
 
 void VirtualTerminal::erase_to_end_of_line()
 {
+    // 擦除后填充的是**当前背景色**（BCE），不是完整继承当前 SGR：前景、粗体、
+    // 反显等都不属于擦除出的空白格。探针若把完整 current_style_ 搬过去，会让
+    // 一个从未被画过的空格伪装成 styled caret。
+    const Cell erased{.style = CellStyle{
+        .bg = current_style_.bg,
+        .bg_rgb = current_style_.bg_rgb,
+    }};
     auto& row = grid_[static_cast<std::size_t>(cursor_row_)];
     for (auto column = static_cast<std::size_t>(cursor_column_); column < row.size();
          ++column) {
-        row[column] = Cell{};
+        row[column] = erased;
     }
 }
 
 void VirtualTerminal::erase_to_end_of_screen()
 {
     erase_to_end_of_line();
+    const Cell erased{.style = CellStyle{
+        .bg = current_style_.bg,
+        .bg_rgb = current_style_.bg_rgb,
+    }};
     for (auto row = static_cast<std::size_t>(cursor_row_) + 1; row < grid_.size(); ++row) {
-        std::ranges::fill(grid_[row], Cell{});
+        std::ranges::fill(grid_[row], erased);
     }
+}
+
+bool VirtualTerminal::apply_sgr(std::string_view params)
+{
+    const std::optional<std::vector<int>> parsed = sgr_parameters(params);
+    if (!parsed) {
+        return false;
+    }
+
+    // 先在新状态上走完整条序列，成功才提交 —— 半途失败的序列不该留下
+    // 一半的样式（探针要么完整建模，要么整条交给 unhandled）。
+    CellStyle next = current_style_;
+    const auto set_color = [&next](bool foreground, int value) {
+        if (foreground) {
+            next.fg = value;
+            next.fg_rgb = 0;
+        } else {
+            next.bg = value;
+            next.bg_rgb = 0;
+        }
+    };
+
+    const std::vector<int>& list = *parsed;
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        const int value = list[i];
+        switch (value) {
+            case 0:
+                next = CellStyle{};
+                break;
+            case 1:
+                next.bold = true;
+                break;
+            case 2:
+                next.dim = true;
+                break;
+            case 3:
+                next.italic = true;
+                break;
+            case 4:
+                next.underline = true;
+                break;
+            case 7:
+                next.inverse = true;
+                break;
+            case 9:
+                next.strikethrough = true;
+                break;
+            case 22:
+                next.bold = false;
+                next.dim = false;
+                break;
+            case 23:
+                next.italic = false;
+                break;
+            case 24:
+                next.underline = false;
+                break;
+            case 27:
+                next.inverse = false;
+                break;
+            case 29:
+                next.strikethrough = false;
+                break;
+            case 39:
+                set_color(true, CellStyle::kDefault);
+                break;
+            case 49:
+                set_color(false, CellStyle::kDefault);
+                break;
+            case 38:
+            case 48: {
+                // 扩展色。两种标准形态之外（含子参数不够、分量越界）算没建模。
+                const bool foreground = (value == 38);
+                if (i + 1 >= list.size()) {
+                    return false;
+                }
+                const int mode = list[i + 1];
+                if (mode == 5) {
+                    if (i + 2 >= list.size() || list[i + 2] < 0 || list[i + 2] > 255) {
+                        return false;
+                    }
+                    set_color(foreground, 16 + list[i + 2]);
+                    i += 2;
+                } else if (mode == 2) {
+                    if (i + 4 >= list.size()) {
+                        return false;
+                    }
+                    unsigned rgb = 0;
+                    for (int component = 1; component <= 3; ++component) {
+                        const int channel = list[i + 1 + static_cast<std::size_t>(component)];
+                        if (channel < 0 || channel > 255) {
+                            return false;
+                        }
+                        rgb = (rgb << 8) | static_cast<unsigned>(channel);
+                    }
+                    if (foreground) {
+                        next.fg = CellStyle::kTrueColor;
+                        next.fg_rgb = rgb;
+                    } else {
+                        next.bg = CellStyle::kTrueColor;
+                        next.bg_rgb = rgb;
+                    }
+                    i += 4;
+                } else {
+                    return false;
+                }
+                break;
+            }
+            default:
+                if (value >= 30 && value <= 37) {
+                    set_color(true, value - 30);
+                } else if (value >= 90 && value <= 97) {
+                    set_color(true, value - 90 + 8);
+                } else if (value >= 40 && value <= 47) {
+                    set_color(false, value - 40);
+                } else if (value >= 100 && value <= 107) {
+                    set_color(false, value - 100 + 8);
+                } else {
+                    return false;  // 未建模：闪烁 / 隐藏 / 上划线 … 一律落 unhandled
+                }
+                break;
+        }
+    }
+    current_style_ = next;
+    return true;
 }
 
 void VirtualTerminal::apply_csi(std::string_view params, char final_byte)
@@ -217,7 +390,12 @@ void VirtualTerminal::apply_csi(std::string_view params, char final_byte)
                 return;
             }
             break;
-        case 'm':  // SGR：颜色/样式不影响格子记账
+        case 'm':  // SGR：改写当前绘图状态，后续绘制的格子带上它
+            if (!apply_sgr(params)) {
+                unhandled_.emplace_back(
+                    std::string{"CSI "} + std::string{params} + final_byte
+                );
+            }
             return;
         default:
             break;
@@ -318,7 +496,22 @@ std::vector<std::string> VirtualTerminal::screen() const
 bool VirtualTerminal::cell_blank(int row, int column) const
 {
     const std::vector<Cell>& line = grid_.at(static_cast<std::size_t>(row));
-    return line.at(static_cast<std::size_t>(column)).text.empty();
+    const Cell& cell = line.at(static_cast<std::size_t>(column));
+    // 宽字符的续格是「被占用的空白」：它没有自己的文本，但那两列属于
+    // 同一个字形，不该被当成空格子。
+    return cell.text.empty() && !cell.continuation;
+}
+
+std::string VirtualTerminal::cell_text(int row, int column) const
+{
+    const std::vector<Cell>& line = grid_.at(static_cast<std::size_t>(row));
+    return line.at(static_cast<std::size_t>(column)).text;
+}
+
+CellStyle VirtualTerminal::cell_style(int row, int column) const
+{
+    const std::vector<Cell>& line = grid_.at(static_cast<std::size_t>(row));
+    return line.at(static_cast<std::size_t>(column)).style;
 }
 
 }  // namespace my_agent::test

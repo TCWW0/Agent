@@ -18,11 +18,75 @@
 // 一旦实现改动，探针会悄悄不再鉴别。
 
 #include <cstddef>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace my_agent::test {
+
+// 一格上生效的 SGR 事实 —— 「这一格被画成了什么样」。存在的理由：有一类被画
+// 出来的格子在纯文本网格里**根本看不见** —— 光标格就是典型：它靠反显/前景色
+// 把自己与周围的正文区分开，正文内容却可能一模一样（maya 的 composer 甚至
+// 发同一串块字形字节，只换样式来表示「看得见 / 看不见」）。只记账文本的探针
+// 对这类格子没有鉴别力。
+//
+// 刻意只做结构化记录与相等比较，不做语义解释：什么颜色算「高对比」、哪个
+// 属性算「暗掉」是主题与断言的事，不是探针的事。未建模的 SGR 参数照旧落进
+// unhandled()（与转义序列同一条纪律：静默忽略会让探针在实现变化后悄悄失去
+// 鉴别力）。
+struct CellStyle {
+    // fg/bg 的取值域：
+    //   kDefault   终端默认
+    //   0..7       基本色（SGR 30-37 / 40-47）
+    //   8..15      亮色（SGR 90-97 / 100-107 归一化到 +8）
+    //   16..271    256 色（SGR 38;5;N ⇒ 16+N），与色号同构可比
+    //   kTrueColor 24 位真彩（SGR 38;2;r;g;b），分量在 fg_rgb / bg_rgb
+    static constexpr int kDefault = -1;
+    static constexpr int kTrueColor = -2;
+
+    int fg{kDefault};
+    int bg{kDefault};
+    unsigned fg_rgb{};
+    unsigned bg_rgb{};
+    bool bold{};
+    bool dim{};
+    bool italic{};
+    bool underline{};
+    bool strikethrough{};
+    bool inverse{};
+
+    [[nodiscard]] bool operator==(const CellStyle&) const = default;
+};
+
+// gtest 的失败输出。默认打印会把这种结构体渲染成一串裸字节
+// （"24-byte object <0F-00 00-00 …>"），断言样式时根本读不出差异。
+inline void PrintTo(const CellStyle& style, std::ostream* out)
+{
+    *out << "style{fg=" << style.fg << ", bg=" << style.bg;
+    if (style.fg == CellStyle::kTrueColor || style.bg == CellStyle::kTrueColor) {
+        *out << ", rgb=" << style.fg_rgb << "/" << style.bg_rgb;
+    }
+    if (style.bold) {
+        *out << ", bold";
+    }
+    if (style.dim) {
+        *out << ", dim";
+    }
+    if (style.italic) {
+        *out << ", italic";
+    }
+    if (style.underline) {
+        *out << ", underline";
+    }
+    if (style.strikethrough) {
+        *out << ", strikethrough";
+    }
+    if (style.inverse) {
+        *out << ", inverse";
+    }
+    *out << "}";
+}
 
 class VirtualTerminal {
 public:
@@ -43,6 +107,14 @@ public:
     // 空白用：screen() 已把行尾空白裁掉，字节串答不了「第 N 列是什么」。
     [[nodiscard]] bool cell_blank(int row, int column) const;
 
+    // 指定格的文本（空白格返回空串；宽字符的续格也返回空串 —— 它的内容
+    // 在首格上）。screen() 的字符串下标在含宽字符的行上不等于显示列，
+    // 所以按列定位内容只能用这个。
+    [[nodiscard]] std::string cell_text(int row, int column) const;
+
+    // 指定格被画出来时生效的样式。空白格返回它被擦除/跳过时的样式。
+    [[nodiscard]] CellStyle cell_style(int row, int column) const;
+
     // 遇到过的未实现序列，原样记下以便探针断言它是空的。
     [[nodiscard]] const std::vector<std::string>& unhandled() const noexcept
     {
@@ -59,11 +131,15 @@ private:
     struct Cell {
         std::string text;      // 空表示空白
         bool continuation{};   // 宽字符的第二格
+        CellStyle style;       // 画这一格时生效的样式
     };
 
     void put(char32_t code_point, int width);
     void scroll_up();
     void apply_csi(std::string_view params, char final_byte);
+    // SGR 参数 → current_style_ 的迁移。返回 false 表示有参数没建模，
+    // 调用方据此落进 unhandled()。整条序列要么全生效要么不动。
+    [[nodiscard]] bool apply_sgr(std::string_view params);
     void erase_to_end_of_line();
     void erase_to_end_of_screen();
 
@@ -78,6 +154,7 @@ private:
     bool alt_screen_ = false;
     int alt_scrolls_ = 0;
     int overruns_ = 0;
+    CellStyle current_style_;  // SGR 建立的当前绘图状态
 };
 
 }  // namespace my_agent::test

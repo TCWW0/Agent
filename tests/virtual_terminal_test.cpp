@@ -8,6 +8,7 @@
 namespace {
 
 using my_agent::test::VirtualTerminal;
+using my_agent::test::CellStyle;
 
 // 这一组测的是**量具本身**，不是产品代码，所以它们必须绿。
 // 存在的理由：幽灵行探针的全部结论都建立在这个虚拟终端的记账上，而「断言通过」
@@ -83,7 +84,28 @@ TEST(VirtualTerminalTest, WideCharactersOccupyTwoCells)
     terminal.feed("\x1b[1;1H你好世");
 
     EXPECT_EQ("你好世", terminal.screen()[0]);
+    EXPECT_FALSE(terminal.cell_blank(0, 1))
+        << "宽字形的第二列没有文本，但仍是被该字形占用的格子";
     EXPECT_EQ(0, terminal.scrolls_in_alt_screen());
+    EXPECT_TRUE(terminal.unhandled().empty());
+}
+
+// 场景：SGR 改变后续格子的样式，reset 只影响 reset 之后画的格子。
+// 领域语义：caret seam 通过 cell_style 判断「一格被画成什么样」，所以量具必须
+// 证明它既不会漏掉样式，也不会在 reset 后把旧样式串到下一格。期望值直接来自
+// SGR 字面量：97=亮白前景、44=蓝背景、1=粗体、7=反显、0=全部重置。
+TEST(VirtualTerminalTest, SgrStyleIsRecordedPerCellAndResetForLaterCells)
+{
+    VirtualTerminal terminal{4, 1};
+    terminal.feed("\x1b[97;44;1;7mA\x1b[0mB");
+
+    const CellStyle styled = terminal.cell_style(0, 0);
+    EXPECT_EQ(15, styled.fg);
+    EXPECT_EQ(4, styled.bg);
+    EXPECT_TRUE(styled.bold);
+    EXPECT_TRUE(styled.inverse);
+
+    EXPECT_EQ(CellStyle{}, terminal.cell_style(0, 1));
     EXPECT_TRUE(terminal.unhandled().empty());
 }
 

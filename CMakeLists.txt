@@ -876,6 +876,27 @@ gtest_discover_tests(
     TEST_PREFIX "dock_layout."
 )
 
+# caret 接缝（issue #26 红 3）：caret 必须是**画出来的一格**，而不是硬件光标
+# 元数据；不得挤动正文，并且要跨两次成功提交与同一 FrameBuffer 的 resize 保持
+# 实心。断言落在 VirtualTerminal 的格子上（文本 + 样式）。
+add_executable(
+    caret_seam_test
+    tests/caret_seam_test.cpp
+)
+
+target_link_libraries(
+    caret_seam_test
+    PRIVATE
+        my_agent_ui_screen
+        my_agent_virtual_terminal
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    caret_seam_test
+    TEST_PREFIX "caret_seam."
+)
+
 # TUI 事件循环：apply_key 是纯的（按键 -> UiState 变更 + 可选 Msg），
 # run_ui 才碰 poll 与终端。分开是为了让按键语义脱离 tty 可测。
 add_library(
