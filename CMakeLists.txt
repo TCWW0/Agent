@@ -50,9 +50,9 @@ FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 # — the very thing this project exists to demonstrate. Rendering only; the
 # event loop stays ours. Do not reintroduce run<Program>() as a "simplification".
 #
-# Pinned to the same commit as agentty's maya submodule (2026-07-21). Fetched
-# from the upstream git repo (not the local ../agentty path) so we get a clean
-# pin unaffected by any local submodule drift.
+# 当前分支依赖本地 Maya 的 SolidCell 扩展（基于 cc35bcf）。默认使用项目内
+# 的 maya/ 工作副本；显式传入 FETCHCONTENT_SOURCE_DIR_MAYA 时仍以调用方为准。
+# 该扩展尚未进入远程仓库，因此不能伪装成可回退到旧上游 pin。
 #
 # Two options MUST be forced off before MakeAvailable:
 #   MAYA_BUILD_EXAMPLES — we don't build maya's demos.
@@ -61,10 +61,26 @@ FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 # (maya's tests/fuzzers already default OFF.)
 set(MAYA_BUILD_EXAMPLES OFF CACHE INTERNAL "")
 set(MAYA_NATIVE_TUNING  OFF CACHE INTERNAL "")
+set(_my_agent_local_maya "${CMAKE_CURRENT_SOURCE_DIR}/maya")
+if(EXISTS "${_my_agent_local_maya}/CMakeLists.txt"
+   AND NOT FETCHCONTENT_SOURCE_DIR_MAYA)
+    set(
+        FETCHCONTENT_SOURCE_DIR_MAYA
+        "${_my_agent_local_maya}"
+        CACHE PATH "Local maya source checkout" FORCE
+    )
+endif()
+unset(_my_agent_local_maya)
+if(NOT FETCHCONTENT_SOURCE_DIR_MAYA)
+    message(FATAL_ERROR
+        "This branch requires a local Maya checkout containing "
+        "Composer::CaretMode::SolidCell. Place it at ${CMAKE_CURRENT_SOURCE_DIR}/maya "
+        "or set FETCHCONTENT_SOURCE_DIR_MAYA explicitly."
+    )
+endif()
 FetchContent_Declare(
     maya
-    GIT_REPOSITORY https://github.com/1ay1/maya.git
-    GIT_TAG cc35bcf5faf8dfddb284b0ac5a531025873765da
+    SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_MAYA}"
     SYSTEM
 )
 FetchContent_MakeAvailable(maya)

@@ -57,6 +57,7 @@ maya::Composer::Config composer_config(const Model& model, const UiState& ui)
     maya::Composer::Config cfg;
     cfg.text = ui.input;
     cfg.cursor = static_cast<int>(ui.cursor == std::string::npos ? ui.input.size() : ui.cursor);
+    cfg.caret_mode = maya::Composer::CaretMode::SolidCell;
     cfg.state = composer_state(model);
     return cfg;
 }
