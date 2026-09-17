@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include <termios.h>
 
@@ -56,6 +57,9 @@ public:
 
     // 新语义屏幕的运行时入口。ScreenConfig 已经把 transcript 与 dock 分开；
     // 驱动只负责整屏组合、终端尺寸以及 write/commit 边界。
+    //
+    // 尺寸变化或写失败后，终端像素与 front 的对应关系不可知，render 会放弃差分
+    // 改走全量序列化（逐行重画 + 每行擦尾），写完整才重新拥有可差分的 front。
     [[nodiscard]]
     bool render(const ScreenConfig& screen) noexcept;
 
@@ -74,8 +78,32 @@ private:
     bool is_tty_;
     // 进入 raw mode 之前的 termios，析构时原样写回。
     termios saved_termios_{};
-    std::unique_ptr<maya::FrameBuffer> framebuffer_;
+
+    // —— 终端一致性状态（类型形状取自 maya app 的 FullscreenState）——
+    // Synced：front == 终端像素，可差分。Divergent：终端像素未知（尺寸变化、
+    // 写失败后）。Divergent 里物理上没有 canvas —— 差分在类型上就无从发出，
+    // 状态切换漏一处是编译错误而不是运行时侥幸。
+    // Divergent 的渲染路径：按当前尺寸新建 fb、完整绘制、\x1b[H + 逐行序列化
+    // （每行 EL 擦尾）、与帧字节同一次 write —— 写完整才提升回 Synced。
+    struct Synced {
+        std::unique_ptr<maya::FrameBuffer> framebuffer;
+    };
+    struct Divergent {};
+    // 初始状态在构造函数里给（Divergent）：内联初始化器会把 variant 的构造
+    // 基类实例化进每个包含本头的 TU，而那里 maya::FrameBuffer 只有前向声明。
+    std::variant<Synced, Divergent> coherence_;
+    // 滚动位置是 UI 状态不是屏幕状态，必须在 Divergent 降级/提升中幸存。
     std::unique_ptr<maya::ScrollState> transcript_scroll_;
+
+    // Synced 的 front 若与新尺寸不符即降级（fb 析构）。SIGWINCH 之外的双保险：
+    // 渲染入口自查尺寸，信号丢了也会在对账时发现失同步。
+    void demote_if_size_changed(Size size) noexcept;
+
+    // 写出与状态推进的边界。写完整才 commit 并把 fb 提升为 Synced（front ==
+    // 终端像素重新成立）；任何失败丢弃 fb、保持/降为 Divergent —— write_all 是
+    // 循环，失败时可能已写出部分字节，终端状态未知，下一帧必须全量。
+    bool ship_frame(std::unique_ptr<maya::FrameBuffer> framebuffer,
+                    const std::string& bytes) noexcept;
 };
 
 }  // namespace my_agent::ui

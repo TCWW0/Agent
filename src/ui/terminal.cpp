@@ -7,6 +7,8 @@
 #include <maya/core/scroll_state.hpp>
 #include <maya/element/builder.hpp>
 #include <maya/render/frame.hpp>
+#include <maya/render/pipeline.hpp>
+#include <maya/render/serialize.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/conversation.hpp>
 
@@ -60,6 +62,44 @@ extern "C" void crash_signal_handler(int signal_number)
     std::raise(signal_number);
 }
 
+// 整屏 Element：transcript pane（吸收 dock 之外的剩余高度）+ dock（禁缩）。
+// agentty 的 Conversation 在 Inline 模式下靠自然高度进入终端 scrollback；
+// 本项目保留备用屏，因此对应物是一个固定 viewport：Conversation 在 scrolly
+// 内按自然高度布局，pane 吸收 dock 之外的剩余高度，dock 则禁止收缩。
+[[nodiscard]]
+maya::Element build_fullscreen_element(
+    const ScreenConfig& screen, const Size& size, maya::ScrollState& scroll)
+{
+    using namespace maya::dsl;
+
+    maya::Element conversation = (
+        maya::Conversation{screen.transcript}.build()
+            | width(size.columns)
+    ).build();
+    maya::Element scroll_content = v(std::move(conversation)).build();
+    maya::Element transcript = maya::detail::vstack()
+        .grow(1.0f)
+        .shrink(1.0f)
+        .min_height(maya::Dimension::fixed(0))
+        .overflow(maya::Overflow::Hidden)
+        (std::move(scroll_content)
+            | scrolly(scroll, 0)
+            | grow(1.0f));
+
+    return maya::detail::vstack()
+        .width(maya::Dimension::fixed(size.columns))
+        .height(maya::Dimension::fixed(size.rows))
+        .overflow(maya::Overflow::Hidden)
+        (
+            std::move(transcript),
+            // 与 agentty 的 AppLayout 一样，让父级 cross-axis stretch
+            // 分配可用宽度。根节点已经给出整屏宽度，dock 只声明自己的
+            // 左右 gutter；这里不重复制造第二份宽度边界。
+            dock_element(screen.dock)
+                | shrink(0.0f)
+        );
+}
+
 }  // namespace
 
 // 1049 是「切备用屏并存光标位置」的组合，比老的 47 + 独立存光标少一次往返。
@@ -91,7 +131,9 @@ TerminalDriver::TerminalDriver(int input_fd, int output_fd)
       // 两端都必须是 tty。只有输出是 tty 时（`cat file | my_agent`）改不了输入的
       // termios，读键盘的那套逻辑无从工作，只能整体回退。
       is_tty_{::isatty(input_fd) == 1 && ::isatty(output_fd) == 1},
-      framebuffer_{std::make_unique<maya::FrameBuffer>()},
+      // 初始即 Divergent：构造时对终端像素一无所知（备用屏刚切进来是空白这件事
+      // 不是驱动可依赖的事实），首帧必须全量序列化。
+      coherence_{Divergent{}},
       transcript_scroll_{std::make_unique<maya::ScrollState>()}
 {
     if (!is_tty_) {
@@ -149,98 +191,132 @@ int TerminalDriver::input_fd() const noexcept
 bool TerminalDriver::render(const Frame& frame) noexcept
 {
     const Size current_size = size();
-    if (framebuffer_->width() != current_size.columns
-        || framebuffer_->height() != current_size.rows) {
-        framebuffer_->resize(current_size.columns, current_size.rows);
-    }
+    demote_if_size_changed(current_size);
 
     const int max_column = std::max(0, current_size.columns - 1);
     const int max_row = std::max(0, current_size.rows - 1);
+    const maya::Theme& theme = maya::theme::dark;
+    maya::Position cursor{};
+    bool cursor_visible = false;
     if (frame.cursor) {
-        framebuffer_->set_cursor(maya::Position{
+        cursor = maya::Position{
             maya::Columns{std::clamp(frame.cursor->column, 0, max_column)},
             maya::Rows{std::clamp(frame.cursor->row, 0, max_row)},
-        });
-        framebuffer_->set_cursor_visible(true);
-    } else {
-        framebuffer_->set_cursor_visible(false);
+        };
+        cursor_visible = true;
     }
 
-    const maya::Theme& theme = maya::theme::dark;
-    const std::string& bytes =
-        framebuffer_->render(to_maya_element(frame, theme), theme);
-    if (!write_all(output_fd_, bytes)) {
-        // Maya render() does not swap buffers. Skipping commit on write failure
-        // keeps front_ aligned with the terminal's last successful frame, so
-        // the next render produces a complete diff instead of losing content.
-        return false;
+    if (auto* synced = std::get_if<Synced>(&coherence_)) {
+        // 差分路径：front == 终端像素。
+        maya::FrameBuffer& fb = *synced->framebuffer;
+        if (cursor_visible) {
+            fb.set_cursor(cursor);
+        }
+        fb.set_cursor_visible(cursor_visible);
+        const std::string& bytes = fb.render(to_maya_element(frame, theme), theme);
+        return ship_frame(std::move(synced->framebuffer), bytes);
     }
-    framebuffer_->commit();
-    return true;
+
+    // Divergent：全量序列化。光标用绝对定位（CUP）归位，不依赖未知的旧位置。
+    auto fb = std::make_unique<maya::FrameBuffer>(current_size.columns, current_size.rows);
+    if (cursor_visible) {
+        fb->set_cursor(cursor);
+    }
+    fb->set_cursor_visible(cursor_visible);
+    std::string out;
+    auto opened = maya::RenderPipeline<maya::stage::Idle>::start(
+                      fb->back().canvas, fb->style_pool(), theme, out)
+                      .clear()
+                      .paint(to_maya_element(frame, theme))
+                      .open_frame();
+    out += "\x1b[H";
+    maya::serialize(fb->back().canvas, fb->style_pool(), out);
+    std::move(opened)
+        .apply_cursor(fb->back().cursor, fb->front().cursor,
+                      fb->back().cursor_visible, fb->front().cursor_visible)
+        .close_frame();
+    return ship_frame(std::move(fb), out);
 }
 
 bool TerminalDriver::render(const ScreenConfig& screen) noexcept
 {
     const Size current_size = size();
-    if (framebuffer_->width() != current_size.columns
-        || framebuffer_->height() != current_size.rows) {
-        framebuffer_->resize(current_size.columns, current_size.rows);
-    }
-
-    // Composer 使用应用绘制的 SolidCell caret；硬件光标继续隐藏，避免同屏双光标。
-    framebuffer_->set_cursor_visible(false);
-
-    const bool follow_tail = transcript_scroll_->at_bottom();
-    const auto build_screen = [&]() {
-        using namespace maya::dsl;
-
-        // agentty 的 Conversation 在 Inline 模式下靠自然高度进入终端 scrollback；
-        // 本项目保留备用屏，因此对应物是一个固定 viewport：Conversation 在 scrolly
-        // 内按自然高度布局，pane 吸收 dock 之外的剩余高度，dock 则禁止收缩。
-        maya::Element conversation = (
-            maya::Conversation{screen.transcript}.build()
-                | width(current_size.columns)
-        ).build();
-        maya::Element scroll_content = v(std::move(conversation)).build();
-        maya::Element transcript = maya::detail::vstack()
-            .grow(1.0f)
-            .shrink(1.0f)
-            .min_height(maya::Dimension::fixed(0))
-            .overflow(maya::Overflow::Hidden)
-            (std::move(scroll_content)
-                | scrolly(*transcript_scroll_, 0)
-                | grow(1.0f));
-
-        return maya::detail::vstack()
-            .width(maya::Dimension::fixed(current_size.columns))
-            .height(maya::Dimension::fixed(current_size.rows))
-            .overflow(maya::Overflow::Hidden)
-            (
-                std::move(transcript),
-                // 与 agentty 的 AppLayout 一样，让父级 cross-axis stretch
-                // 分配可用宽度。根节点已经给出整屏宽度，dock 只声明自己的
-                // 左右 gutter；这里不重复制造第二份宽度边界。
-                dock_element(screen.dock)
-                    | shrink(0.0f)
-            );
-    };
+    demote_if_size_changed(current_size);
 
     const maya::Theme& theme = maya::theme::dark;
-    maya::Element element = build_screen();
-    const std::string* bytes = &framebuffer_->render(element, theme);
+    // Composer 使用应用绘制的 SolidCell caret；硬件光标继续隐藏，避免同屏双光标。
+    const bool follow_tail = transcript_scroll_->at_bottom();
+    const auto build = [&]() {
+        return build_fullscreen_element(screen, current_size, *transcript_scroll_);
+    };
 
-    // 第一次 paint 会把新的 max_y 写回 ScrollState。用户原本位于末尾时，内容增长
-    // 后立即跟随到新末尾并重建一次树；否则尊重未来的手动回看位置。
+    if (auto* synced = std::get_if<Synced>(&coherence_)) {
+        // 差分路径：front == 终端像素。
+        maya::FrameBuffer& fb = *synced->framebuffer;
+        fb.set_cursor_visible(false);
+        maya::Element element = build();
+        const std::string* bytes = &fb.render(element, theme);
+
+        // 第一次 paint 会把新的 max_y 写回 ScrollState。用户原本位于末尾时，内容增长
+        // 后立即跟随到新末尾并重建一次树；否则尊重未来的手动回看位置。
+        if (follow_tail && !transcript_scroll_->at_bottom()) {
+            transcript_scroll_->scroll_to_bottom();
+            element = build();
+            bytes = &fb.render(element, theme);
+        }
+        return ship_frame(std::move(synced->framebuffer), *bytes);
+    }
+
+    // Divergent：全量序列化重建「front == 终端像素」。\x1b[H 归位后逐行 serialize，
+    // 每行 EL 擦尾 —— 旧宽度残留的右边框 / 列块全在这一帧里被覆盖或擦除。
+    // 与帧字节同一次 write：EAGAIN 半途而废时终端上不会先出现半张全量帧。
+    auto fb = std::make_unique<maya::FrameBuffer>(current_size.columns, current_size.rows);
+    fb->set_cursor_visible(false);
+    std::string out;
+    const auto paint = [&]() {
+        out.clear();
+        auto opened = maya::RenderPipeline<maya::stage::Idle>::start(
+                          fb->back().canvas, fb->style_pool(), theme, out)
+                          .clear()
+                          .paint(build())
+                          .open_frame();
+        out += "\x1b[H";
+        maya::serialize(fb->back().canvas, fb->style_pool(), out);
+        std::move(opened).close_frame();
+    };
+    paint();
     if (follow_tail && !transcript_scroll_->at_bottom()) {
         transcript_scroll_->scroll_to_bottom();
-        element = build_screen();
-        bytes = &framebuffer_->render(element, theme);
+        paint();
     }
+    return ship_frame(std::move(fb), out);
+}
 
-    if (!write_all(output_fd_, *bytes)) {
+void TerminalDriver::demote_if_size_changed(Size size) noexcept
+{
+    if (const auto* synced = std::get_if<Synced>(&coherence_)) {
+        if (synced->framebuffer->width() != size.columns
+            || synced->framebuffer->height() != size.rows) {
+            // front 只对旧尺寸成立，对现在的终端像素无效 —— 析构它，下一帧全量。
+            // 不走 FrameBuffer::resize：那会把 front 抹白，让 diff 误以为
+            // 「新帧的空格 == front 的空格」从而跳过擦除 —— 幽灵单元格的成因。
+            coherence_ = Divergent{};
+        }
+    }
+}
+
+bool TerminalDriver::ship_frame(std::unique_ptr<maya::FrameBuffer> framebuffer,
+                                const std::string& bytes) noexcept
+{
+    if (!write_all(output_fd_, bytes)) {
+        // 失败即丢弃 fb（析构 → 仍是/降为 Divergent）。write_all 是循环，失败时
+        // 可能已写出部分字节：终端像素未知，保留 front 只会让下一帧差分建立在
+        // 假前提上。代价是 EAGAIN 也要重付一次全量序列化 —— 正确性优先，把它
+        // 区分成「零字节可推迟 / 硬错误必须降级」是背压片的事。
         return false;
     }
-    framebuffer_->commit();
+    framebuffer->commit();
+    coherence_ = Synced{std::move(framebuffer)};
     return true;
 }
 
