@@ -207,6 +207,84 @@ TEST(UiLoopTest, DeclinesToRunWithoutATtySoTheCallerCanFallBack)
     ::close(devnull);
 }
 
+// issue #26 红 4：真实事件循环必须画语义 Screen，而不是继续把 Model 压成旧 Frame。
+// 一条 tracer bullet 同时穿过 run_ui → project_screen → TerminalDriver → pty：
+// 初始帧先看到新 Composer 的占位文案；提交后再看到 Conversation 的 speaker chrome
+// 和助手正文。旧路径虽然也能吐出消息文本，却没有 "type a message"、"you"、
+// "agent" 这些 Maya widget 拥有的语义外观，因此不能靠正文碰巧出现蒙混过关。
+TEST(UiLoopTest, RunsTheSemanticTranscriptAndDockOnARealTerminal)
+{
+    constexpr std::string_view kUser = "RUNTIME_SCREEN_USER_7F3A";
+    constexpr std::string_view kAssistant = "RUNTIME_SCREEN_AGENT_9C2E";
+
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    my_agent::AsyncHost host{[kAssistant](
+        my_agent::Request, my_agent::EventSink sink) {
+        sink(my_agent::Msg{my_agent::StreamTextDelta{
+            .text = std::string{kAssistant},
+        }});
+        sink(my_agent::Msg{my_agent::StreamFinished{}});
+    }};
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalDriver terminal{replica, replica};
+        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+    }};
+
+    std::string seen;
+    const auto read_until = [&seen, primary](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+            if (::poll(&probe, 1, 200) > 0) {
+                char buffer[4096];
+                const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+                if (count > 0) {
+                    seen.append(buffer, static_cast<std::size_t>(count));
+                }
+            }
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("\x1b[?1049h")) {
+        ADD_FAILURE() << "driver did not enter the alternate screen";
+        stop();
+        return;
+    }
+    if (!read_until("type a message")) {
+        ADD_FAILURE() << "initial frame did not contain the semantic composer";
+        stop();
+        return;
+    }
+
+    const std::string typed = std::string{kUser} + "\r";
+    EXPECT_EQ(static_cast<ssize_t>(typed.size()),
+              ::write(primary, typed.data(), typed.size()));
+    EXPECT_TRUE(read_until(kAssistant))
+        << "assistant reply did not pass through the semantic transcript";
+    EXPECT_NE(std::string::npos, seen.find(kUser));
+    EXPECT_NE(std::string::npos, seen.find("you"));
+    EXPECT_NE(std::string::npos, seen.find("agent"));
+
+    stop();
+}
+
 // 场景：流式 token 在**回合结束之前**就出现在屏幕上。
 // 领域语义：这是整个 issue #10 存在的理由。行式 REPL 实测的缺陷是「敲完回车之后
 // 19 秒死寂，然后整段一次性出现」—— 因为 run_until_quiescent 在 phase 是 Streaming
