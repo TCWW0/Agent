@@ -1,4 +1,5 @@
 #include "my_agent/ui/ui_loop.hpp"
+#include "virtual_terminal.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,27 @@
 #include <gtest/gtest.h>
 
 namespace {
+
+// 断言必须落在「解码后的屏幕」上，而不是原始字节流上。
+//
+// 差分渲染器只重写发生变化的格 —— 屏幕内容完全正确的帧里，一个词的相邻
+// 字符也可能被 CUP 定位切开。批准工具调用时屏幕从 "[pending]" 变为
+// "[done]"，而 old 'n' == new 'n'，那一格被整段跳过：字节流里根本不存在
+// 连续的 "[done]" 子串。直接对字节流 find() 锚定的是渲染器的编码细节，
+// 不是它在屏幕上画出了什么。喂进会建模屏幕的 VirtualTerminal 再断言屏幕
+// 文本，才是这条不变量真正想说的东西。
+[[nodiscard]]
+std::string decoded_screen(std::string_view bytes, int columns, int rows)
+{
+    my_agent::test::VirtualTerminal terminal(columns, rows);
+    terminal.feed(bytes);
+    std::string text;
+    for (const std::string& line : terminal.screen()) {
+        text += line;
+        text += '\n';
+    }
+    return text;
+}
 
 using my_agent::ui::apply_key;
 using my_agent::ui::Key;
@@ -642,7 +664,9 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
     const char approve = 'y';
     EXPECT_EQ(1, ::write(primary, &approve, 1));
     EXPECT_TRUE(read_until(kContinuationSentinel));
-    EXPECT_NE(std::string::npos, seen.find("[done]"));
+    const std::string screen = decoded_screen(seen, 80, 24);
+    EXPECT_NE(std::string::npos, screen.find("[done]"))
+        << "批准后屏幕上应是被标记为完成的工具调用:\n" << screen;
     EXPECT_TRUE(received_expected_args.load(std::memory_order_acquire));
 
     stop();
@@ -743,7 +767,9 @@ TEST(UiLoopTest, RejectsARealToolCallThroughThePtyWithoutExecutingIt)
     const char reject = 'n';
     EXPECT_EQ(1, ::write(primary, &reject, 1));
     EXPECT_TRUE(read_until(kContinuationSentinel));
-    EXPECT_NE(std::string::npos, seen.find("[rejected]"));
+    const std::string screen = decoded_screen(seen, 80, 24);
+    EXPECT_NE(std::string::npos, screen.find("[rejected]"))
+        << "拒绝后屏幕上应是被标记为拒绝的工具调用:\n" << screen;
     EXPECT_FALSE(tool_executed.load(std::memory_order_acquire));
 
     stop();

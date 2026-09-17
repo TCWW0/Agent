@@ -968,6 +968,7 @@ target_link_libraries(
     ui_loop_test
     PRIVATE
         my_agent_ui_loop
+        my_agent_virtual_terminal
         GTest::gtest_main
 )
 
