@@ -1,8 +1,10 @@
 // 幽灵行 pty 复现探针（切片 #12）。
 //
 // 存在的理由：幽灵行是用户报告的现象，肉眼在 20 行以上的滚动输出里不可靠。
-// 这个文件把它变成一条**可复现、可归因**的失败断言，作为后续两片的验收标准。
-// 本片刻意**不修任何东西** —— 产出就是这些红。
+// 成因修复后，这里剩一条守不变量的绿探针：输入行粘宽字符必须在 cell canvas
+// 内折行，光标不越右边距、备用屏不物理滚动 —— 任何一侧回归都会当场红。
+// 原第二条「末行溢出」场景已删：dock 架构后 composer 永不位于物理末行，
+// 该场景结构上不可能发生；40x8 高度预算留给尺寸契约那片另立新红。
 //
 // 三层结构，每层都不可省：
 //   1. 真 pty —— 真实的 raw mode、真实的 write、真实的驱动。字节串断言做不到。
@@ -136,89 +138,6 @@ TEST(GhostLineProbeTest, PastingEmojiIntoTheInputLineDoesNotScrollTheAltScreen)
     EXPECT_EQ(0, screen.scrolls_in_alt_screen())
         << "备用屏滚动了 " << screen.scrolls_in_alt_screen()
         << " 次 —— Maya 应该在自己的 cell canvas 内处理长输入，而不是让终端物理滚动";
-}
-
-// 场景：屏幕已被历史消息占满，此时输入行落在**最末物理行**上并溢出。
-// 领域语义：这是上一条不覆盖的那一半，也是三处成因叠加最完整的形态。
-// 中间行溢出时，下一行的 CUP 会清掉待换行状态，损害局限在「多占一行」；
-// 而末行溢出**没有下一行**可定位 —— 备用屏整体上滚，顶行被顶掉，
-// 此后每一次绝对定位都落在错位的物理行上。这才是用户报告的「重复打印」。
-//
-// 用真 provider（假的流式回答）把帧填满 8 行：文本用纯 ASCII，宽度可预测，
-// 保证幽灵行的成因**只有** emoji 那一条，不与折行本身混在一起。
-//
-// Red 原因：同上一条（成因 1 + 成因 3），但失败形态是滚动而不是多占一行。
-TEST(GhostLineProbeTest, OverflowOnTheLastRowDoesNotScrollAwayTheHistory)
-{
-    int primary = -1;
-    int replica = -1;
-    winsize initial{
-        .ws_row = static_cast<unsigned short>(kRows),
-        .ws_col = static_cast<unsigned short>(kColumns),
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
-    };
-    if (::openpty(&primary, &replica, nullptr, nullptr, &initial) != 0) {
-        GTEST_SKIP() << "openpty unavailable in this environment";
-    }
-
-    // 每段 30 个 x，40 列下折成一行；8 段足够把 8 行的帧填满并触发尾部裁剪。
-    std::string reply;
-    for (int index = 0; index < 8; ++index) {
-        reply += std::string(30, 'x');
-        reply += ' ';
-    }
-    my_agent::AsyncHost host{[reply](my_agent::Request, my_agent::EventSink sink) {
-        sink(my_agent::Msg{my_agent::StreamTextDelta{.text = reply}});
-        sink(my_agent::Msg{my_agent::StreamFinished{}});
-    }};
-
-    std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
-    }};
-
-    std::string seen;
-    ASSERT_TRUE(read_until(primary, seen, "\x1b[?1049h", 5)) << "驱动没能进入全屏";
-    ASSERT_EQ(std::string::npos, seen.find(kSentinel))
-        << "哨兵在敲键之前就已经存在，探针无鉴别力";
-
-    // 先发一句让 provider 吐出长回答，把屏幕填满。
-    const std::string ask = "go\r";
-    ASSERT_EQ(static_cast<ssize_t>(ask.size()), ::write(primary, ask.data(), ask.size()));
-    ASSERT_TRUE(read_until(primary, seen, std::string(30, 'x'), 5)) << "长回答没上屏";
-
-    // 屏幕填满之后再抓一次基线：这才是 emoji 输入的「之前」。
-    const std::size_t baseline = seen.size();
-
-    std::string payload;
-    for (int index = 0; index < 25; ++index) {
-        payload += "\xE2\x9C\x85";  // U+2705 ✅，官方判定 W（2 列）
-    }
-    payload += kSentinel;  // 尾部：理由同上一条
-    ASSERT_EQ(static_cast<ssize_t>(payload.size()),
-              ::write(primary, payload.data(), payload.size()));
-    ASSERT_TRUE(read_until(primary, seen, kSentinel, 5)) << "输入行从未上屏";
-    static_cast<void>(read_until(primary, seen, "\xFF", 1));
-    ASSERT_GT(seen.size(), baseline) << "emoji 输入之后一个字节都没多出来";
-
-    const char eof = 0x04;
-    static_cast<void>(::write(primary, &eof, 1));
-    ui_thread.join();
-    host.shutdown();
-    ::close(replica);
-    ::close(primary);
-
-    my_agent::test::VirtualTerminal screen{kColumns, kRows};
-    screen.feed(seen);
-
-    ASSERT_TRUE(screen.unhandled().empty())
-        << "量具遇到了没记账的序列/码点：" << screen.unhandled().front();
-    ASSERT_TRUE(screen.in_alt_screen()) << "字节流里没有备用屏，抓错了东西";
-
-    EXPECT_EQ(0, screen.scrolls_in_alt_screen())
-        << "备用屏滚动了 " << screen.scrolls_in_alt_screen()
-        << " 次 —— 此后每一次 CUP 都落在错位的物理行上，这就是幽灵行";
 }
 
 }  // namespace
