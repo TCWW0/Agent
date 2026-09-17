@@ -1,11 +1,14 @@
 #include "my_agent/ui/terminal.hpp"
 
+#include "virtual_terminal.hpp"
+
 #include <cerrno>
 #include <cstddef>
 #include <csignal>
 #include <string>
 
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <pty.h>
 #include <termios.h>
@@ -333,6 +336,104 @@ TEST(TerminalTest, RenderSkipsMayaCommitWhenTheWriteFails)
     ASSERT_TRUE(driver.render(frame));
     const std::string settled = read_available(pipe.read_fd);
     EXPECT_EQ(std::string::npos, settled.find(kSentinel)) << settled;
+}
+
+// 场景：备用屏里终端从 20 列加宽到 40 列，之后渲染同一块语义屏。
+// 领域语义：差分的全部前提是「front == 终端像素」。尺寸变化恰好摧毁它——驱动
+// 把 framebuffer 换到新尺寸时 front 被抹成空白，diff 于是判定「新帧是空格、front
+// 也是空格、没变、跳过」，而物理屏上那些格子还留着旧宽度的内容（旧右边框、旧
+// 列块）：跳过即永久残留，这就是幽灵单元格。更糟的是连行尾 EL 都不发——trailing
+// EL 只在「front 在行尾有内容」时触发，抹白后的 front 恒为空白，need_clear 恒假。
+// 所以尺寸一变，驱动与终端之间唯一成立的事实是「屏上有旧内容、范围未知」，
+// 必须放弃差分改走全量序列化（逐行重画 + 每行擦尾），写成功后才重新拥有可差分
+// 的 front。
+// 断言是「脏屏收敛」：同一份帧字节分别喂给带着旧内容的终端模型和空白终端模型，
+// 最终网格必须一致——全量序列化是唯一能让脏屏收敛的输出形状，任何残留都会让
+// 两个网格分叉。终端模型用保留式 resize（驱动关 DECAWM，真实终端 resize 不重排
+// 只截断/补白），「旧内容还在」是被建模的事实而非假设。
+// Red 原因：render() 在尺寸变化时把 framebuffer resize 后照常差分，diff 在结构上
+// 无法表达擦除——脏屏不收敛，旧宽度的边框留在屏上。
+TEST(TerminalTest, WideningTheTerminalLeavesNoGhostCellsFromTheOldWidth)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    winsize narrow{};
+    narrow.ws_col = 20;
+    narrow.ws_row = 8;
+    ASSERT_EQ(0, ::ioctl(replica, TIOCSWINSZ, &narrow));
+    ASSERT_TRUE(make_nonblocking(primary));
+
+    const my_agent::ui::ScreenConfig screen{};
+    my_agent::ui::TerminalDriver driver{replica, replica};
+    ASSERT_TRUE(driver.render(screen));
+    const std::string first_frame = read_available(primary);
+
+    my_agent::test::VirtualTerminal terminal{20, 8};
+    terminal.feed(first_frame);
+    ASSERT_TRUE(terminal.unhandled().empty())
+        << "首帧包含 VirtualTerminal 尚未建模的序列";
+
+    // 前置一：找旧帧实际画到的最右内容列（dock 留左右 gutter，末列本身不画）。
+    // 右边框、右对齐 chip 这类「随宽度换列块」的内容就停在这一列附近——加宽后
+    // 它们该挪去新列块，这一列在新帧里该是空白。若旧帧没用到半宽以上，本测试
+    // 对「新帧留空被跳过」就没有可残留的东西，会在实现空转时悄悄通过。
+    int stale_row = -1;
+    int stale_col = -1;
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 20; ++col) {
+            if (!terminal.cell_blank(row, col) && col > stale_col) {
+                stale_col = col;
+                stale_row = row;
+            }
+        }
+    }
+    ASSERT_GE(stale_col, 10) << "旧帧没有用到半宽以上：前置不成立，红测试失去鉴别力";
+
+    winsize wide{};
+    wide.ws_col = 40;
+    wide.ws_row = 8;
+    ASSERT_EQ(0, ::ioctl(replica, TIOCSWINSZ, &wide));
+    terminal.resize(40, 8);
+
+    // 前置二：保留式 resize 后旧内容仍在。否则脏屏被量具自身抹掉，收敛断言
+    // 空转——这正是 caret_seam 的 resize 场景新建空白 VT 抓不到幽灵的原因。
+    ASSERT_FALSE(terminal.cell_blank(stale_row, stale_col))
+        << "保留式 resize 应留下旧内容：量具自身不成立";
+
+    ASSERT_TRUE(driver.render(screen));
+    const std::string second_frame = read_available(primary);
+    ASSERT_FALSE(second_frame.empty()) << "加宽后的重绘一个字节都没发";
+
+    my_agent::test::VirtualTerminal clean{40, 8};
+    clean.feed(my_agent::ui::enter_bytes());
+    clean.feed(second_frame);
+    ASSERT_TRUE(clean.unhandled().empty())
+        << "同一份帧字节在空白终端上有未建模的序列";
+
+    // 前置三：场景里真的存在「旧帧有内容、新帧为空白」的格子——幽灵候选。
+    // 没有它，任何实现都能让收敛断言通过（空转）。此刻 terminal 还没喂第二帧，
+    // 读到的就是旧屏内容。
+    int candidate_row = -1;
+    for (int row = 0; row < 8 && candidate_row < 0; ++row) {
+        for (int col = 0; col < 20; ++col) {
+            if (!terminal.cell_blank(row, col) && clean.cell_blank(row, col)) {
+                candidate_row = row;
+                break;
+            }
+        }
+    }
+    ASSERT_GE(candidate_row, 0) << "没有旧内容在新帧留空的格子：场景无幽灵候选";
+
+    terminal.feed(second_frame);
+    ASSERT_TRUE(terminal.unhandled().empty())
+        << "加宽后的帧包含 VirtualTerminal 尚未建模的序列";
+
+    EXPECT_EQ(clean.screen(), terminal.screen())
+        << "加宽后的重绘没有覆盖旧宽度的内容——幽灵单元格留在屏上";
 }
 
 // 场景：非 tty 上查询尺寸。

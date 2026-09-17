@@ -1151,6 +1151,7 @@ target_link_libraries(
     terminal_test
     PRIVATE
         my_agent_ui_terminal
+        my_agent_virtual_terminal
         GTest::gtest_main
 )
 

@@ -145,4 +145,25 @@ TEST(VirtualTerminalTest, UnimplementedSequencesAreRecorded)
     EXPECT_EQ("CSI 1;2r", terminal.unhandled()[0]);
 }
 
+// 场景：终端 resize（保留式，左上锚定）。
+// 领域语义：本项目驱动关 DECAWM，真实终端此时 resize 不重排、只截断/补白。
+// 量具必须复现「旧格还在」：幽灵单元格断言靠脏屏收敛 —— 若 resize 把旧格清掉，
+// 脏屏被悄悄抹干净，收敛断言空转（caret_seam 当年新建空白 VT 抓不到幽灵，
+// 是同一个坑的另一种踩法）。光标钳进新边界，写在旧位置上会覆写旧内容。
+TEST(VirtualTerminalTest, ResizeKeepsOldCellsAndTruncatesBeyondTheNewWidth)
+{
+    VirtualTerminal terminal{20, 4};
+    terminal.feed("\x1b[2;18HAB");  // row 1: cols 17-18
+
+    terminal.resize(30, 4);  // 加宽：旧格留下，新列空白
+    EXPECT_EQ("A", terminal.cell_text(1, 17));
+    EXPECT_EQ("B", terminal.cell_text(1, 18));
+    EXPECT_TRUE(terminal.cell_blank(1, 29));
+
+    terminal.resize(18, 4);  // 变窄：col 17 还在，col 18 截掉，光标从 19 钳到 17
+    EXPECT_EQ("A", terminal.cell_text(1, 17));
+    terminal.feed("Z");      // 落在钳位后的旧内容上：覆写
+    EXPECT_EQ("Z", terminal.cell_text(1, 17));
+}
+
 }  // namespace

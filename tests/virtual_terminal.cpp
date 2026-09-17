@@ -473,6 +473,25 @@ void VirtualTerminal::feed(std::string_view bytes)
     }
 }
 
+void VirtualTerminal::resize(int columns, int rows)
+{
+    grid_.resize(static_cast<std::size_t>(rows));
+    for (std::vector<Cell>& row : grid_) {
+        row.resize(static_cast<std::size_t>(columns));
+    }
+    columns_ = columns;
+    rows_ = rows;
+    // 光标钳进新边界。宽字符在截断边缘可能失去续格 —— 截掉的列本就视口外
+    // 不可寻址，且 resize 后的下一帧会全量重绘，不追究这个残缺。
+    if (rows > 0) {
+        cursor_row_ = std::clamp(cursor_row_, 0, rows - 1);
+    }
+    if (columns > 0) {
+        cursor_column_ = std::clamp(cursor_column_, 0, columns - 1);
+    }
+    pending_wrap_ = false;
+}
+
 std::vector<std::string> VirtualTerminal::screen() const
 {
     std::vector<std::string> rows;
