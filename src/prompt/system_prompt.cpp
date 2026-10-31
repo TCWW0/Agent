@@ -1,8 +1,6 @@
 #include "my_agent/prompt/system_prompt.hpp"
 
-#include <filesystem>
 #include <string>
-#include <system_error>
 
 #if defined(__linux__)
 #include <sys/utsname.h>
@@ -12,7 +10,7 @@ namespace my_agent::prompt {
 namespace {
 
 constexpr const char* kIdentity =
-    "You are my_agent, a command-line coding assistant.\n"
+    "You are TCAgent, a command-line coding assistant.\n"
     "\n"
     "You help with software engineering tasks: reading code, running "
     "calculations, and answering questions about the project you are in.\n"
@@ -36,23 +34,6 @@ constexpr const char* kIdentity =
     "before answering. Each passage carries a file path and line range; use "
     "read on that path when you need the surrounding context. The trailing "
     "mode: line says whether matching was hybrid or BM25-only.\n";
-
-std::string detect_os()
-{
-#if defined(__linux__)
-    utsname info{};
-    if (uname(&info) == 0) {
-        return std::string{info.sysname} + " " + info.release;
-    }
-    return "Linux";
-#elif defined(_WIN32)
-    return "Windows";
-#elif defined(__APPLE__)
-    return "macOS";
-#else
-    return "unknown";
-#endif
-}
 
 }  // namespace
 
@@ -84,15 +65,21 @@ std::string build(const Context& context)
     return prompt;
 }
 
-Context capture_environment()
+std::string host_operating_system()
 {
-    std::error_code error;
-    std::filesystem::path cwd = std::filesystem::current_path(error);
-
-    return Context{
-        .working_directory = error ? std::string{"unknown"} : cwd.string(),
-        .operating_system = detect_os(),
-    };
+#if defined (__linux__)
+    utsname info{};
+    if (uname(&info) == 0) {
+        return std::string{info.sysname} + " " + info.release;
+    }
+    return "Linux";
+#elif defined(_WIN32)
+    return "Windows";
+#elif defined(__APPLE__)
+    return "macOS";
+#else
+    return "unknown";
+#endif
 }
 
 }  // namespace my_agent::prompt

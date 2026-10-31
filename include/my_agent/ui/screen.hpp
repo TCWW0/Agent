@@ -8,29 +8,54 @@
 // widget 组合，我们的 dock 组合语义（permission slot 的位置、空行与 gutter
 // 规则）归本层所有，布局片（#26 后续红）再落成 Element。
 //
-// 旧的自有 Frame IR（view.hpp）逐片退役，本结构是它的后继者。
-// 与 view() 同一条纪律：纯函数，不碰终端、不碰时钟、不碰文件。
-// 不收 Size —— 宽度属于布局层（maya RenderContext），语义层与坐标系无关，
-// 这是旧 Frame「不带屏幕尺寸」原则的延续。
+// 纯投影：不碰终端、不碰时钟、不碰文件。
+// 不收 Size —— 宽度属于布局层（maya RenderContext），语义层与坐标系无关。
 
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <maya/element/element.hpp>
 #include <maya/style/theme.hpp>
+#include <maya/style/style.hpp>
 #include <maya/widget/composer.hpp>
 #include <maya/widget/conversation.hpp>
 #include <maya/widget/permission.hpp>
 #include <maya/widget/status_bar.hpp>
 
 #include "my_agent/runtime/model.hpp"
-#include "my_agent/ui/view.hpp"
+#include "my_agent/ui/ui_state.hpp"
 
 namespace my_agent::ui {
 
+struct TranscriptGuidanceConfig {
+    struct Run {
+        std::string text;
+        maya::Style style{};
+    };
+
+    std::vector<Run> full;
+    std::vector<Run> compact;
+};
+
+// The queue is domain state, but its waiting preview belongs to the fixed dock
+// rather than the scrollable transcript. It is deliberately one compact row:
+// the label carries FIFO position/count and the text is truncated by the
+// layout element when the terminal is narrow.
+struct QueuePreviewConfig {
+    std::string label;
+    std::string text;
+    maya::Style label_style{};
+    maya::Style text_style{};
+};
+
 // 屏幕的 dock：活动中的 chrome。permission slot 是领域决策的出口，
-// composer 是输入焦点，status 是相位与开销。三者在 dock 里，不进 transcript。
+// guidance 是 transcript 导航提示，queue preview 是待消费队头，composer 是
+// 输入焦点，status 是相位与开销。它们都在 dock 里，不进 transcript。
 struct DockConfig {
     std::optional<maya::Permission::Config> permission;
+    TranscriptGuidanceConfig transcript_guidance;
+    std::optional<QueuePreviewConfig> queue_preview;
     maya::Composer::Config composer;
     maya::StatusBar::Config status;
 };
@@ -42,18 +67,25 @@ struct ScreenConfig {
 };
 
 // Model + UiState → 语义屏幕的投影。纯函数。配色走 Theme（语义色 →
-// 实际色的解析在投影内完成），主题由调用方注入 —— 与旧链路
-// to_maya_element(frame, theme) 同一条纪律：颜色策略从正门进来。
+// 实际色的解析在投影内完成），主题由调用方注入。
 [[nodiscard]]
 ScreenConfig project_screen(
     const Model& model, const UiState& ui, const maya::Theme& theme);
 
 // dock 的布局翻译：DockConfig → maya::Element。布局契约（issue #26 验收 2）：
-// permission slot（如有）居顶；composer 上方恰好一空行；composer 紧贴
-// status 上方；status 之下不画任何行；左右各一列 gutter。
-// transcript 的布局与整屏贴底策略不在此层 —— 全屏 adapter（terminal.cpp）
+// permission slot（如有）居顶；composer 上方保留 breathing row 与 guidance row；
+// composer 紧贴 status 上方；status 之下不画任何行；左右各一列 gutter。
+// transcript 的布局与整屏贴底策略不在此层 —— 全屏 adapter（painter.cpp）
 // 持有它们，本函数只对 dock 自身的内部规则负责。
 [[nodiscard]]
 maya::Element dock_element(const DockConfig& dock);
+
+// Height-aware dock used by the fullscreen adapter. The selected candidate is
+// measured at the real terminal width and must leave one transcript row when
+// the terminal has at least one row to spare. This is a layout policy only;
+// scroll geometry remains owned by the transcript viewport.
+[[nodiscard]]
+maya::Element dock_element_for_height(
+    const DockConfig& dock, int available_width, int terminal_rows);
 
 }  // namespace my_agent::ui

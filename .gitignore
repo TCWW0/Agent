@@ -1,5 +1,13 @@
 build/
-docs/
+docs/*
+!docs/QUEUE-TURN-STATE-MACHINE-DESIGN.md
+!docs/CONTEXT-COMPACTION-MVP-PRD.md
+!docs/MODEL-REFACTORING-GUIDE.md
+!docs/RUNTIME-ARCHITECTURE-REFACTOR-PLAN.md
+!docs/RUNTIME-ARCHITECTURE.md
+!docs/RUNTIME-REFACTOR-VALIDATION.md
+!docs/REFACTOR-MILESTONE-2026-10-09.md
+!docs/ARCHITECTURE-SIMPLIFICATION-DECISIONS-2026-10-09.md
 
 # project-scoped memory: facts about this workspace, not shared history
 .my_agent/

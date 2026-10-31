@@ -142,8 +142,11 @@ Skill parse_skill(
     return skill;
 }
 
-SkillEngine::SkillEngine(std::vector<std::filesystem::path> roots)
+SkillEngine::SkillEngine(
+    std::vector<std::filesystem::path> roots,
+    std::function<bool(const std::filesystem::path&)> register_read_root)
     : roots_(std::move(roots))
+    , register_read_root_(std::move(register_read_root))
 {
 }
 
@@ -189,6 +192,10 @@ std::vector<Skill> SkillEngine::all() const
                 [&skill](const Skill& seen) { return seen.name == skill.name; }
             );
             if (already) {
+                continue;
+            }
+
+            if (register_read_root_ && !register_read_root_(skill.dir)) {
                 continue;
             }
 

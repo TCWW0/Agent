@@ -25,6 +25,7 @@ TUI 这一轮的特点是**大量判断只能靠量测决定**。异步 + 终端
 - [八、端到端实测](#八端到端实测)
 - [九、被拒绝的方案](#九被拒绝的方案)
 - [十、Maya 迁移后的审计](#十maya-迁移后的审计)
+- [十一、ScreenConfig 之后的渲染消费路径](#十一screenconfig-之后的渲染消费路径)
 - [附录：可迁移原则速查](#附录可迁移原则速查)
 
 ---
@@ -588,6 +589,259 @@ Maya 只接在 `Frame` 之后，所以以下六条原则没有因依赖迁移而
 
 ---
 
+## 十一、ScreenConfig 之后的渲染消费路径
+
+前十节记的是「面对什么选择、选了什么」。这一节体例不同：`ScreenConfig → Element`
+之后的三段全是 Maya 既定机制，没有本项目的取舍可记，所以这里记的是**落点表** ——
+目的是省掉后来人重新追一遍源码的成本，以及在动这棵树之前先知道它会咬哪里。
+下面的行号取自本仓 `maya/` 工作树当前状态，每条写到纸上之前都就地核过。
+
+### 四段管道
+
+```
+ScreenConfig
+  │ ① 翻译   widget 的 build()                   本项目 + Maya widget 共同写
+  ▼
+Element 树（变体数据树，不含任何像素）
+  │ ② 展平   render_detail::build_layout_tree    renderer.cpp:425
+  ▼
+vector<LayoutNode>（下标即身份，没有指针）
+  │ ③ 求解   layout::compute                     yoga.hpp:263 / yoga.cpp:834
+  ▼
+每节点一个父相对 Rect（LayoutNode::computed）
+  │ ④ 上色   render_detail::paint_element        renderer.cpp:857
+  ▼
+Canvas（cell + StylePool）→ diff / 序列化 → 终端字节
+```
+
+除这四段，还有一层 `thread_local` 的**跨帧组件缓存**，它在 ② 的 measure
+（`renderer.cpp:627-691`）和 ④ 的 paint（`:1536-1661`）两处都会短路。缓存的完整
+机制记在 `TODO.md` 附录第 5 条。
+
+### ① 翻译：三档物化时机
+
+同一个 `.build()`，成本发生在什么时刻有三档：
+
+| 档 | 例子 | 机制 |
+|---|---|---|
+| 急切 | `Turn::build()`（`hash_id` 空时，**本项目就是这条**） | 直接 `build_inner`，每帧真建整棵子树（`turn.hpp:160-163`、`:183`） |
+| 半惰性 | `Composer::build()`（仅 streaming/executing 态） | 把 `build_impl` 塞进 `ComponentElement.render` lambda（`composer.hpp:236-249`） |
+| 惰性 | composer 的 hint 行 | `component(lambda)`（`composer.hpp:618`） |
+
+三档的区别不是「能不能渲染」，而是**谁在什么时候付构造成本**。`Conversation` 走
+`cfg.turns` 这条路时是急切档，源码注释写得很直白：*every `Turn::Config` in this
+vector gets `Turn{cfg}.build()` called on it once per frame*（`conversation.hpp:56`）。
+判据「值不值得改」见 `TODO.md` 第 5 条末尾。
+
+翻译层的产物只有**结构 + 属性**，没有任何画好的东西 —— 连文字都只是
+`TextElement{content, style}`。本项目真实的树（一条用户消息 + 流式回复 + 半截输入）：
+
+```
+vstack(width=fixed(cols), height=fixed(rows), overflow=Hidden)    terminal.cpp:89-100
+├── vstack(grow=1, shrink=1, min_height=fixed(0), overflow=Hidden)   transcript pane
+│   └── [scrolly 包装]                                              terminal.cpp:86
+│       └── v(conversation)                   有意加的一层，见下    terminal.cpp:79
+│           └── Conversation::build()                              conversation.hpp:130
+│               └── v(rows) | padding(0,1)                         conversation.hpp:179
+│                   ├── Turn element #0 "you"                      turn.hpp:158
+│                   │   └── box(Row, border=left Bold, pad left 2)  ← "rail"
+│                   │       └── v(header, blank, body_rows, error_block) | grow(1)
+│                   └── Turn element #1 "agent"
+└── dock | shrink(0.0f)                                            terminal.cpp:99
+    └── v(rows) | padding(0,1)                                     screen.cpp:35
+        ├── blank()                                                ← 呼吸行
+        ├── Composer::build()            → v(inner, rule, hints) | border(Round) | bcolor   composer.hpp:760-762
+        └── StatusBar::build()           → v(3 rows)               status_bar.hpp:99,131-133
+```
+
+`terminal.cpp:79` 那句 `v(std::move(conversation))` 是**未经核实**的一处。它看着多余：
+`Conversation::build()` 返回的已经是 `BoxElement`（`v(rows) | padding(0,1)`），而
+`scrolly` 即使拿到非 Box 的 inner 也会自己包一层（`dsl.hpp:974-1016`），所以它不构成
+「scrolly 需要它」的理由。`dsl.hpp:925-929` 的注释倒是给了一个方向：多一层包装会改变
+`align_items` 的传递（Stretch 只把包装层的那一个孩子拉到包装宽度，不再拉孙子）——
+`scrolly` 自己会设 `align_self = Start`（`dsl.hpp:966`），这一层大概是在隔离这个影响。
+但**注释和 commit 里都没有写它的理由**，这是读代码的推断。动这一行之前先构造探针，
+别按这条推断改。
+
+`fill_available_height = false`（`screen.cpp:203`）会改变整棵 transcript 的形状 ——
+不追加尾部 `spacer()`、也不套 `grow(1.0f)`（`conversation.hpp:177-182`）。理由写在字段
+自己的注释里（`conversation.hpp:116-120`）：这个 fill 是给 inline 的 AppLayout 用的，
+Conversation 在那里要吸收 composer 上方的富余高度；**而全屏宿主把它放进滚动视口时
+必须关掉，否则那段合成的空白会变成可滚动内容，跟随尾部时会把上面的真实 turn 藏到
+视口外**。注意这跟「composer 不要 `grow`」是两个不同的理由（后者在
+`composer.hpp:769-779`，措辞沿用的是 agentty 的 AppLayout，本项目现在的关系是
+「transcript pane 吸收富余高度、dock 禁缩」，结论一样但别把两条理由混起来）。
+
+### ② 展平：树 → 平坦向量 + 下标
+
+`build_layout_tree` 深度优先，每个 `Element` `emplace_back` 一个 `LayoutNode` 并
+返回其在 `nodes` 里的下标，父节点把子下标存进 `children`（`renderer.cpp:425-737`）。
+
+不用树本身是为了 ③ 的三趟算法需要反复随机访问节点，而**下标是稳定身份** ——
+缓存条目、ledger 回写、hit 区域都靠它；同时没有指针就没有生命周期问题，
+`nodes.clear()` 就能复用整块内存。
+
+| Element 变体 | 映射到 LayoutNode | **没进 LayoutNode 的** |
+|---|---|---|
+| `BoxElement` `:431-485` | style 全字段搬运（direction/wrap/align/justify/grow/shrink/basis/width/height/min/max/gap/padding/margin）+ border 折算成每边 1 格 | **border 的字形与颜色**、背景色；`is_stack` 的盒子只把第 0 个孩子纳入布局（`:474-476`） |
+| `TextElement` `:487-501` | **只有 measure**：`TextElement::measure(max_width)` | style 完全不进布局 —— 字色粗细不影响尺寸 |
+| `ElementList` / `ElementListRef` `:503-531` | 一个默认构造的匿名节点 + 全部孩子 | 它自己没样式，所以叫「透明」 |
+| `ComponentElement` `:533-735` | FlexStyle 的**子集**（无 direction/wrap/justify/gap/border）+ measure | 组件内部结构要等 `render` 被调用才出现 |
+
+`MeasureFn` 是**函数指针 + `const void* ctx`**（`yoga.hpp:118-125`），不是
+`std::function` —— measure 路径上没有堆分配。所以「每帧全建」的代价主要在建 Element
+和 layout，不在 measure 的调用开销上。
+
+`ComponentElement` 的 measure 有三支（`:554-565` / `:566-723` / `:724-733`）：有
+`node.measure` 就用它（老路，契约靠人守，注释原话是 *Drift between the two silently
+clips rows*）；否则若有 `render` 就**跑一遍 render 然后数行**（自动 measure，注释说
+这样 *makes measure/render disagreement structurally impossible*，代价是每帧 render
+两次）；都没有则退化成 `{max_width, 1}` 的占位。
+
+**两个陷阱：**
+
+`overflow` 在 Box 分支里被赋值了两次（`:457-459` 显式映射，紧接着 `:471-472` 用
+`static_cast` 覆盖）。两者结果相同 —— element 侧枚举（`box.hpp:62-66`）与 layout 侧
+（`yoga.hpp:66-70`）顺序都是 Visible/Hidden/Scroll —— 所以第一处是死代码。读代码时
+容易以为「这里有一层显式翻译」，其实没有。
+
+`element.hpp:57-59` 的注释说 `ElementList` 会被「spliced directly into the parent's
+child list」，实现却是包一个匿名 Column 容器（`renderer.cpp:506-512`）。注释与实现
+不符，而多一层容器会改变百分比解析基准与 min/max 链。**本项目不受影响**：grep 零命中
+`ElementList`，它唯一的产生者是 `dsl::map()`（`dsl.hpp:385`），本项目没用；
+`v(vector)` 走 BoxBuilder 的 range 重载（`builder.hpp:177-181`），出来仍是
+`BoxElement`。所以上面那张树图的节点数是真的，没有被藏掉一层。
+
+### ③ 求解：LayoutNode → Rect
+
+`LayoutNode` 只有四个字段（`yoga.hpp:127-132`）：`style` / `children` / `measure` /
+`computed`。比 `Element` 少得多 —— **它只回答「多大 / 在哪」，不回答「长什么样」**。
+
+根节点的约束不由调用方的那两行 `width/height(fixed)` 决定，而是 `render_tree` 强制
+覆盖的（`renderer.cpp:2047-2053`）：
+
+```cpp
+layout_nodes[root_idx].style.width  = Dimension::fixed(canvas.width());
+if (!auto_height)
+    layout_nodes[root_idx].style.height = Dimension::fixed(canvas.height());
+layout::compute(layout_nodes, root_idx, canvas.width(), canvas.height());
+```
+
+「整屏」的物理来源是这一句，`terminal.cpp:90-91` 写的只是把话说在前面。
+
+`computed.pos` 是**父相对**坐标。`yoga.hpp:272-276` 有个 `resolve_absolute` 可以累加
+成绝对坐标，但 ④ 不调它 —— 因为 `Scroll` 需要在递归途中改写 offset，一次性算绝对
+坐标反而做不了平移。
+
+### ④ 上色：两棵树同时走
+
+```cpp
+void paint_element(const Element& elem, Canvas& canvas, StylePool& pool,
+                   const std::vector<layout::LayoutNode>& layout_nodes,
+                   std::size_t layout_idx, int offset_x, int offset_y);
+```
+
+签名同时收 `Element` 和 `LayoutNode` 两条线，靠下标对齐 —— 位置来自后者，内容来自
+前者。这是 ② 里「LayoutNode 丢掉视觉信息」的**代价**：不可能只走一棵树。
+
+`ax = offset_x + computed.pos.x`（`renderer.cpp:870-871`）逐层累加成绝对坐标。
+`Overflow::Scroll` 的视口在递归子项时改写 offset（`:1102-1103`：
+`child_ox = ax - live_scroll_x`），并把内容高度**回写**进 `ScrollState` 的
+`max_x`/`max_y`（`renderer.cpp:996-1074` 这个块，赋值在 `:1027-1033`）。回写发生在
+paint 而不是 layout，这正是 `terminal.cpp:262-266`
+「首帧 paint 后检查 `at_bottom()`、必要时重建一次树」存在的原因。
+
+### 裁剪的四类触发（这一节最会咬人的地方）
+
+裁剪**不只由 `overflow(Hidden)` 决定**。`renderer.cpp:965-968`：
+
+```cpp
+const bool clip_width  = explicit_clipping ||
+    (!is_auto_height() && (bounded_width  || has_b));
+const bool clip_height = explicit_clipping ||
+    (!is_auto_height() && (bounded_height || has_b));
+```
+
+| # | 触发条件 | 裁哪轴 | 受 auto_height 影响 |
+|---|---|---|---|
+| 1 | `overflow` ∈ {Hidden, Scroll} | **两轴** | 否 |
+| 2 | 有 border（`has_b`） | **两轴** | 是 |
+| 3 | `width` 是 fixed/percent | **只裁宽** | 是 |
+| 4 | `height` 是 fixed/percent | **只裁高** | 是 |
+
+生产路径上 `auto_height = false`：`pipeline.hpp:127` 调的是 5 参重载
+`render_tree(root, back_, pool_, theme_)`，默认值在 `renderer.hpp:103`。**所以裁剪在
+全屏路径上一直是开着的**，不是只有写了 `overflow(Hidden)` 的地方才裁。
+
+auto-height 之所以要抑制裁剪（`renderer.cpp:944-951` 注释）：inline/measure 路径上
+canvas 起始比内容小，裁了内容就长不大、高度永远量不出来 → 空白屏。本项目走全屏
+`FrameBuffer`，不碰这条。
+
+把上表套到本项目真实的树上：
+
+- 根 vstack（fixed w/h + Hidden）→ 两轴裁；
+- transcript pane（Hidden）→ 两轴裁，且不依赖 auto_height；
+- scrolly viewport（Scroll）→ 两轴裁 + 平移；
+- **composer 的圆角盒 → 两轴都裁**。它自己没写任何 overflow，裁它的是「它有边框」
+  这件事（`composer.hpp:762` 的 `| border(Round)`），裁在内容矩形
+  `content_w = aw - inner_horizontal()`（`:969-972`）；
+- `Conversation | width(size.columns)`（`terminal.cpp:77`）→ **只裁宽，不裁高**。
+
+3/4 只裁一轴的原因在同一段注释里：*Treating a fixed width as a two-dimensional
+boundary truncates naturally-growing text after its first wrapped row.*
+
+### 落点表：`ScreenConfig` 的每个决定落在哪
+
+| `ScreenConfig` 里的决定 | 落点 | 位置 |
+|---|---|---|
+| `transcript.turns` 的条数与内容 | `Conversation::build` 里 rows 的元素个数 | `conversation.hpp:130` |
+| `fill_available_height = false` | 不追加 `spacer()`、不 `grow(1)` | `screen.cpp:203` → `conversation.hpp:177-182` |
+| 每条 message → 一个 `PlainText` | `turn.body.emplace_back(...)` | `screen.cpp:215` |
+| Turn 的 `label` / `rail_color` | `box().border(Bold, rail_color).border_sides(left)` | `turn.hpp:314-321` |
+| dock 的 `padding(0,1)` | `BoxElement.layout.padding` → `LayoutNode.style.padding` | `screen.cpp:35` |
+| pane `grow(1)/shrink(1)/min_height(0)` | FlexStyle → yoga 伸缩求解 | `terminal.cpp:80-87` |
+| dock `shrink(0.0f)` | `flex_shrink = 0` → yoga 不给它压 | `terminal.cpp:99` |
+| `overflow(Hidden)` | `layout::Overflow::Hidden`（裁剪 + shrink 循环 opt-out） | `terminal.cpp:84` |
+| `scrolly(scroll, 0)` | Scrollable 组件 + `ScrollState` 回写 | `terminal.cpp:86` |
+| `width(size.columns)` | `FlexStyle.width = fixed` | `terminal.cpp:77` |
+| **`theme`** | **只变成 Color 值进 `Style` —— `LayoutNode` 完全看不到** | 全链路 |
+
+最后一行值得单独记一句：**`theme` 在这条链上从不参与布局**。它只参与 ① 的颜色计算
+和 ④ 的上色。这是「`ScreenConfig` 不是自足结构」这个结论的机制层证据 —— 主题被注入
+了两次（投影一次、渲染一次），而不是 `ScreenConfig` 带着它就够了。
+
+### 视觉链与布局链是两条
+
+拿同一个 `Composer::Config` 的两个字段各走一遍：
+
+```
+# 视觉链：phase → 边框颜色
+model.phase
+  → composer_state()        screen.cpp:130    → Composer::State
+  → phase_color()           screen.cpp:152    → cfg.active_color
+  → box_color               composer.hpp:280-285（loop / awaiting 的优先级也在这里）
+  → | bcolor(box_color)     composer.hpp:762  → BoxElement.border.color
+  → 【不进 LayoutNode】
+  → paint_border 时进 StylePool → 序列化时变成 SGR
+
+# 布局链：一个行数下限
+cfg.min_body_rows = 1       screen.cpp:195
+  → while (body_rows.size() < min_body_rows) push blank   composer.hpp:542
+  → inner 多一行 → Element 树多一个节点
+  → LayoutNode 的 measure 结果 +1 → Rect 高 +1
+  → dock 高 +1 → transcript pane 可用高度 -1
+```
+
+**同样出自 `ScreenConfig` 的两个字段，一个只走视觉链、一个只走布局链。** 分不清这两条
+时，改一个颜色会以为要动布局，改一个尺寸会以为会被样式覆盖。这是读这套渲染器最省事的
+一把钥匙。
+
+**可迁移的一般原则**：位置与内容拆到两棵结构里维护，代价是消费方必须同时走两条线并
+靠位置对齐；换来的是一套纯几何的求解算法不必知道任何视觉概念。选哪边要看求解算法的
+复用价值 —— 这里值。
+
+---
+
 ## 附录：可迁移原则速查
 
 脱离本项目上下文的版本。接着 ACCELERATION_NOTES 的 25 条往下编号。
@@ -645,4 +899,16 @@ Maya 只接在 `Frame` 之后，所以以下六条原则没有因依赖迁移而
 43. 同一个测试失败两次就停止推测，构造**两个只差一个变量**的探针。第二次失败是
     「我的心智模型错了」的信号，而模型错了的时候，再读一遍代码只会得到同样的错误结论。
 44. 把 UI 卡顿归因给「渲染慢」之前，先量一次事件到达的时间分布。
+
+**结构与契约**（第十一节）
+
+45. 「透明」是**声明**，不是结构。文档说某个节点会被拼进父节点的 child list，实现可能
+    给它包一层容器 —— 而多一层容器会改变百分比与 min/max 的解析基准。验证透明要看
+    布局树，不要看注释。
+46. 一个行为的触发条件如果既有显式开关又有若干隐式来源，就把隐式的那几处也写出来。
+    只在显式开关处写注释，后来的人会把「没写开关」读成「不会发生」。
+47. 位置与内容拆到两棵结构里维护，代价是消费方必须同时走两条线、靠位置对齐；
+    换来的是一套纯几何的求解算法不必知道任何视觉概念。值不值取决于求解算法的复用价值。
+48. 紧挨着的两次赋值要问哪一次是真的。被下一行覆盖的映射读起来像一层翻译，实际是
+    死代码 —— 而它会让后来的人以为改那里有效。
     2 chunks 和 58 chunks 是完全不同的病，前者根本不在渲染层。

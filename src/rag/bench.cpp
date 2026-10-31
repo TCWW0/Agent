@@ -8,7 +8,7 @@
 // 嵌入（分钟级），此后未变文件直接搬运 —— [corpus] 行是 #42 的验收
 // 数字：第二跑应 reused=全量、embedded=0、build 秒级。
 // 三级阶梯的度量口径与 #41 基线逐位相同（同 pool、直调 bm25_search /
-// hybrid_search，经 Corpus 的只读视图取索引），跨切片可比。
+// retrieve_candidates，经 Corpus 的只读视图取索引），跨切片可比。
 //
 // 阶梯设计（#41 验收口径「差值可测且可解释」，非「hybrid 必须更高」）：
 //   阶梯A 合成查询（BM25 主场）：查询词就是从块里按 tf-idf 挑的，词法
@@ -25,7 +25,11 @@
 
 #include "my_agent/http/http_client.hpp"
 #include "my_agent/rag/rag.hpp"
+#include "nlohmann/json_fwd.hpp"
 
+#include <cstddef>
+#include <exception>
+#include <expected>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -39,6 +43,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -55,6 +60,11 @@ constexpr const char* kChatModel = "qwen3.5:latest";
 constexpr const char* kRewriteCache = "rag_bench_rewrites.json";
 
 struct Case { std::string query; std::uint32_t gold; };
+
+struct Judgment {
+    std::string query;
+    std::vector<std::string> gold;
+};
 
 bool covers(const rag::Chunk& c, const rag::Chunk& gold) {
     return c.path == gold.path
@@ -157,6 +167,186 @@ void report_row(std::string_view name, const Ladder& l, std::size_t k) {
               << "  " << std::setprecision(0) << l.us_per_q << " us/q\n";
     for (std::size_t i = 0; i < l.misses.size() && i < 5; ++i)
         std::cout << l.misses[i] << "\n";
+}
+
+std::expected<std::vector<Judgment>, std::string>
+load_judgments(const fs::path& path) {
+    std::ifstream input(path);
+    if (!input) {
+        return std::unexpected("无法读取 judgments 文件: " + path.string());
+    }
+
+    try {
+        const nlohmann::json document = nlohmann::json::parse(input);
+
+        if (!document.contains("cases") || !document.at("cases").is_array()) {
+            return std::unexpected("judgments 根对象必须包含 cases 数组");
+        }
+
+        std::vector<Judgment> judgments;
+
+        for (const auto& item : document.at("cases")) {
+            if (!item.is_object()
+                || !item.contains("q")
+                || !item.at("q").is_string()
+                || !item.contains("gold")
+                || !item.at("gold").is_array()) {
+                return std::unexpected("每个 case 必须包含字符串 q 和字符串数组 gold");
+            }
+
+            Judgment judgment;
+            judgment.query = item.at("q").get<std::string>();
+
+            if (judgment.query.empty()) {
+                return std::unexpected("case.q 不能为空");
+            }
+
+            for (const auto& value : item.at("gold")) {
+                if (!value.is_string()) {
+                    return std::unexpected("case.gold 的每一项都必须是字符串");
+                }
+
+                std::string path_value = value.get<std::string>();
+                if (path_value.empty()) {
+                    return std::unexpected("case.gold 不能包含空路径");
+                }
+
+                judgment.gold.push_back(std::move(path_value));
+            }
+
+            if (judgment.gold.empty()) {
+                return std::unexpected("case.gold 不能为空");
+            }
+
+            judgments.push_back(std::move(judgment));
+        }
+        if (judgments.empty()) {
+            return std::unexpected("judgments.cases 不能为空");
+        }
+        return judgments;
+    } catch (const std::exception& error) {
+        return std::unexpected(std::string{"judgments 解析失败："} + error.what());
+    }
+}
+
+std::string normalized_path(std::string_view value) {
+    return fs::path(std::string{value}).lexically_normal().generic_string();
+}
+
+bool is_gold_path(std::string_view candidate, const std::vector<std::string>& gold) {
+    const std::string normalized_candidate = normalized_path(candidate);
+
+    return std::any_of(
+        gold.begin(),
+        gold.end(),
+        [&](const std::string& expected) {
+            return normalized_candidate == normalized_path(expected);
+        }
+    );
+}
+
+nlohmann::json describe_stage(const rag::RetrievalResult& result, const std::vector<std::string>& gold) {
+    std::size_t gold_rank = 0;
+    nlohmann::json hits = nlohmann::json::array();
+
+    for (std::size_t i = 0; i < result.passages.size(); ++i) {
+        const auto& provenance = result.passages[i].provenance;
+
+        if (gold_rank == 0 && is_gold_path(provenance.path, gold)) {
+            gold_rank = i + 1;
+        }
+
+        hits.push_back({
+            {"path", provenance.path},
+            {"line_start", provenance.line_start},
+            {"line_end", provenance.line_end},
+        });
+    }
+
+    return nlohmann::json{
+        {"gold_rank", gold_rank},
+        {"hits", std::move(hits)},
+    };
+}
+
+int run_judgments(const fs::path& docs_root, const fs::path& judgments_path) {
+    auto loaded = load_judgments(judgments_path);
+    if (!loaded) {
+        std::cerr << loaded.error() << "\n";
+        return 2;
+    }
+
+    rag::EmbedConfig config;
+    rag::Corpus corpus;
+
+    (void)corpus.build(docs_root, rag::ollama_embed, config);
+
+    if (corpus.chunk_count() == 0) {
+        std::cerr << "目录里没有可用 .md：" << docs_root << "\n";
+        return 2;
+    }
+
+    constexpr std::size_t kCandidateK = 4;
+
+    std::size_t retrieval_hit_at_one = 0;
+    std::size_t local_rerank_hit_at_one = 0;
+
+    for (const Judgment& judgment : *loaded) {
+        rag::RetrievalResult result = corpus.retrieve(
+            judgment.query,
+            rag::ollama_embed,
+            config,
+            kCandidateK);
+
+        const auto before = describe_stage(result, judgment.gold);
+
+        if (!result.passages.empty()
+            && is_gold_path(result.passages.front().provenance.path, judgment.gold)) {
+            ++retrieval_hit_at_one;
+        }
+
+        const rag::RerankResult reranked = rag::rerank_passages(judgment.query, std::move(result));
+
+        const auto after = describe_stage(reranked.retrieval, judgment.gold);
+
+        if (!reranked.retrieval.passages.empty()
+            && is_gold_path(reranked.retrieval.passages.front().provenance.path, judgment.gold)) {
+            ++local_rerank_hit_at_one;
+        }
+
+        const nlohmann::json report{
+            {"q", judgment.query},
+            {"gold", judgment.gold},
+            {"retrieval", before},
+            {"local_rerank", after},
+        };
+
+        std::cout << "[case] " << report.dump() << "\n";
+    }
+
+    const double case_count = static_cast<double>(loaded->size());
+    const double retrieval_score = static_cast<double>(retrieval_hit_at_one) / case_count;
+    const double local_rerank_score = static_cast<double>(local_rerank_hit_at_one) / case_count;
+
+    std::cout
+        << "[judgments] cases=" << loaded->size()
+        << " hit@1="
+        << std::fixed
+        << std::setprecision(3)
+        << retrieval_score
+        << "\n";
+
+    std::cout
+        << "[judgments] stage=local-rerank"
+        << " candidate_k=" << kCandidateK
+        << " cases=" << loaded->size()
+        << " hit@1="
+        << std::fixed
+        << std::setprecision(3)
+        << local_rerank_score
+        << "\n";
+
+    return 0;
 }
 
 // ── 改写探针：LLM 针对 gold 块重新措辞 ───────────────────────────────────
@@ -267,10 +457,19 @@ void save_rewrite_cache(const std::unordered_map<std::string, std::string>& map)
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "用法: rag_bench <docs目录> [k] [probe_n] [embed_model]\n";
+        std::cerr << "用法: rag_bench <docs目录> [k] [probe_n] [embed_model]\n"
+                  << "      rag_bench <docs目录> --judgments <cases.json>\n";
         return 1;
     }
     const fs::path root = argv[1];
+    if (argc >= 3 && std::string_view{argv[2]} == "--judgments") {
+        if (argc != 4) {
+            std::cerr << "用法: rag_bench <docs目录> --judgments <cases.json>\n";
+            return 1;
+        }
+        return run_judgments(root, argv[3]);
+    }
+
     const std::size_t k = argc >= 3 ? std::stoul(argv[2]) : 5;
     const std::size_t probe_n = argc >= 4 ? std::stoul(argv[3]) : 100;
     const std::string embed_model = argc >= 5 ? argv[4] : "nomic-embed-text:latest";
@@ -324,7 +523,7 @@ int main(int argc, char** argv) {
               << "  build=" << build_s << "s"
               << "  cache=" << cache_state << "\n";
 
-    // dense 单路检索：query 向量 + 全库 cosine 线性扫 —— 与 hybrid_search
+    // dense 单路检索：query 向量 + 全库 cosine 线性扫 —— 与候选检索
     // 内部同口径（只收 cosine>0、截断 pool、同分按 chunk-id 升序）。
     // 矩阵里补上这列，hybrid 的差值才能直接分解到 dense 单路质量。
     const auto dense_search = [&](const std::string& q)
@@ -345,6 +544,18 @@ int main(int argc, char** argv) {
         return scored;
     };
 
+    const auto hybrid_hits = [&](const std::string& q) {
+        const rag::CandidateSet result = rag::retrieve_candidates(
+            idx, dense, q, rag::ollama_embed, cfg, pool);
+
+        std::vector<std::pair<std::uint32_t, double>> hits;
+        hits.reserve(result.candidates.size());
+        for (const rag::Candidate& candidate : result.candidates) {
+            hits.emplace_back(candidate.chunk_id, candidate.final_score);
+        }
+        return hits;
+    };
+
     // 5) 阶梯A：合成查询 —— BM25 主场。
     std::cout << "── 合成查询（BM25 主场）──\n";
     const Ladder a_bm25 = run_ladder(cases, chunks, k, pool,
@@ -352,11 +563,8 @@ int main(int argc, char** argv) {
     report_row("bm25-only", a_bm25, k);
     if (dense_ok) {
         report_row("dense-only", run_ladder(cases, chunks, k, pool, dense_search), k);
-        const Ladder a_hybrid = run_ladder(cases, chunks, k, pool,
-            [&](const std::string& q) {
-                return rag::hybrid_search(idx, dense, q, rag::ollama_embed,
-                                          cfg, pool).hits;
-            });
+        const Ladder a_hybrid =
+            run_ladder(cases, chunks, k, pool, hybrid_hits);
         report_row("hybrid", a_hybrid, k);
         std::cout << "  (dense/hybrid 计时含每查询一次 embed 网络往返)\n";
     }
@@ -411,11 +619,8 @@ int main(int argc, char** argv) {
     report_row("bm25-only", b_bm25, k);
     if (dense_ok) {
         report_row("dense-only", run_ladder(probes, chunks, k, pool, dense_search), k);
-        const Ladder b_hybrid = run_ladder(probes, chunks, k, pool,
-            [&](const std::string& q) {
-                return rag::hybrid_search(idx, dense, q, rag::ollama_embed,
-                                          cfg, pool).hits;
-            });
+        const Ladder b_hybrid =
+            run_ladder(probes, chunks, k, pool, hybrid_hits);
         report_row("hybrid", b_hybrid, k);
     }
     return 0;

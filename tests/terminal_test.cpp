@@ -1,4 +1,5 @@
-#include "my_agent/ui/terminal.hpp"
+#include "my_agent/ui/painter.hpp"
+#include "my_agent/ui/terminal_session.hpp"
 
 #include "virtual_terminal.hpp"
 
@@ -6,6 +7,7 @@
 #include <cstddef>
 #include <csignal>
 #include <string>
+#include <utility>
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -61,6 +63,17 @@ struct PipeFds {
         }
     }
 };
+
+my_agent::ui::ScreenConfig screen_with_text(std::string text)
+{
+    my_agent::ui::ScreenConfig screen;
+    screen.transcript.fill_available_height = false;
+    screen.transcript.turns.push_back(maya::Turn::Config{
+        .label = "agent",
+        .body = {maya::Turn::PlainText{.content = std::move(text)}},
+    });
+    return screen;
+}
 
 [[nodiscard]]
 std::string read_available(int fd)
@@ -124,6 +137,12 @@ TEST(TerminalTest, LeaveSequenceReversesEnterSequenceInOppositeOrder)
     const std::string alt_screen_off = "\x1b[?1049l";
     const std::string cursor_hide = "\x1b[?25l";
     const std::string cursor_show = "\x1b[?25h";
+    const std::string mouse_on = "\x1b[?1000h";
+    const std::string sgr_mouse_on = "\x1b[?1006h";
+    const std::string bracketed_paste_on = "\x1b[?2004h";
+    const std::string bracketed_paste_off = "\x1b[?2004l";
+    const std::string mouse_off = "\x1b[?1000l";
+    const std::string sgr_mouse_off = "\x1b[?1006l";
     // DECAWM（自动换行）：进入关、退出开。#14 加进来的纵深防御，若不在这里断言其
     // 对称，未来有人把 leave 的 ?7h 删掉或改序，这条「退出精确逆转进入」的不变量
     // 会静默破掉 —— 破坏验证已证实此前没有任何测试守着它。
@@ -133,34 +152,86 @@ TEST(TerminalTest, LeaveSequenceReversesEnterSequenceInOppositeOrder)
     ASSERT_NE(std::string::npos, enter.find(alt_screen_on));
     ASSERT_NE(std::string::npos, enter.find(autowrap_off));
     ASSERT_NE(std::string::npos, enter.find(cursor_hide));
+    ASSERT_NE(std::string::npos, enter.find(mouse_on));
+    ASSERT_NE(std::string::npos, enter.find(sgr_mouse_on));
+    ASSERT_NE(std::string::npos, enter.find(bracketed_paste_on));
     ASSERT_NE(std::string::npos, leave.find(cursor_show));
     ASSERT_NE(std::string::npos, leave.find(autowrap_on));
     ASSERT_NE(std::string::npos, leave.find(alt_screen_off));
+    ASSERT_NE(std::string::npos, leave.find(sgr_mouse_off));
+    ASSERT_NE(std::string::npos, leave.find(mouse_off));
+    ASSERT_NE(std::string::npos, leave.find(bracketed_paste_off));
 
     // 进入：切备用屏 → 关 autowrap → 藏光标。
     EXPECT_LT(enter.find(alt_screen_on), enter.find(autowrap_off));
     EXPECT_LT(enter.find(autowrap_off), enter.find(cursor_hide));
+    EXPECT_LT(enter.find(mouse_on), enter.find(sgr_mouse_on));
+    EXPECT_EQ(std::string::npos, enter.find("\x1b[?1003h"));
     // 退出：显光标 → 开 autowrap → 回主屏。逐段都是进入的镜像。
     EXPECT_LT(leave.find(cursor_show), leave.find(autowrap_on));
     EXPECT_LT(leave.find(autowrap_on), leave.find(alt_screen_off));
+    EXPECT_LT(leave.find(sgr_mouse_off), leave.find(mouse_off));
+    EXPECT_EQ(std::string::npos, leave.find("\x1b[?1003l"));
 }
 
 // 场景：在非 tty 上构造驱动（CI、管道、`my_agent | tee`）。
 // 领域语义：非 tty 不是错误，是一种正常的运行方式 —— 但 termios 和转义序列在那里
 // 都没有意义。驱动必须能构造成功且自报 `!is_tty()`，让前端据此回退到行式输出。
 // 反过来如果构造失败或照样吐转义序列，重定向到文件的输出里就会混进一堆乱码。
-// Red 原因：仓库尚不存在 TerminalDriver（编译错误）。
+// Red 原因：仓库尚不存在 TerminalSession（编译错误）。
 TEST(TerminalTest, ReportsNonTtyInsteadOfFailingWhenOutputIsNotATerminal)
 {
     const int devnull = ::open("/dev/null", O_WRONLY);
     ASSERT_LE(0, devnull);
 
     {
-        my_agent::ui::TerminalDriver driver{devnull, devnull};
-        EXPECT_FALSE(driver.is_tty());
+        my_agent::ui::TerminalSession session{devnull, devnull};
+        EXPECT_FALSE(session.is_tty());
     }
 
     ::close(devnull);
+
+    PipeFds pipe;
+    ASSERT_TRUE(pipe.open());
+    ASSERT_TRUE(make_nonblocking(pipe.read_fd));
+    {
+        my_agent::ui::TerminalSession session{pipe.write_fd, pipe.write_fd};
+        EXPECT_FALSE(session.is_tty());
+    }
+    EXPECT_TRUE(read_available(pipe.read_fd).empty());
+}
+
+TEST(TerminalTest, EnablesBasicSgrMouseReportingOnlyForThePtyLifetime)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+    ASSERT_TRUE(make_nonblocking(primary));
+
+    const std::string mouse_on = "\x1b[?1000h";
+    const std::string sgr_mouse_on = "\x1b[?1006h";
+    const std::string mouse_off = "\x1b[?1000l";
+    const std::string sgr_mouse_off = "\x1b[?1006l";
+    std::string enter;
+    {
+        my_agent::ui::TerminalSession session{replica, replica};
+        ASSERT_TRUE(session.is_tty());
+        enter = read_available(primary);
+    }
+    const std::string leave = read_available(primary);
+
+    EXPECT_NE(std::string::npos, enter.find(mouse_on));
+    EXPECT_NE(std::string::npos, enter.find(sgr_mouse_on));
+    EXPECT_EQ(std::string::npos, enter.find("\x1b[?1003h"));
+    EXPECT_LT(enter.find(mouse_on), enter.find(sgr_mouse_on));
+    EXPECT_NE(std::string::npos, leave.find(sgr_mouse_off));
+    EXPECT_NE(std::string::npos, leave.find(mouse_off));
+    EXPECT_LT(leave.find(sgr_mouse_off), leave.find(mouse_off));
+
+    ::close(replica);
+    ::close(primary);
 }
 
 // 场景：在真 pty 上进入 raw mode 然后析构。
@@ -183,8 +254,8 @@ TEST(TerminalTest, RestoresTerminalAttributesExactlyOnDestruction)
 
     termios inside{};
     {
-        my_agent::ui::TerminalDriver driver{replica, replica};
-        ASSERT_TRUE(driver.is_tty());
+        my_agent::ui::TerminalSession session{replica, replica};
+        ASSERT_TRUE(session.is_tty());
         ASSERT_EQ(0, ::tcgetattr(replica, &inside));
         // 真的进了 raw mode：回显与行缓冲都关掉了，否则读不到单个按键。
         EXPECT_EQ(0u, inside.c_lflag & static_cast<tcflag_t>(ECHO));
@@ -225,8 +296,8 @@ TEST(TerminalTest, RestoresTerminalWhenTheProcessCrashesWithoutUnwinding)
     const pid_t child = ::fork();
     ASSERT_LE(0, child);
     if (child == 0) {
-        my_agent::ui::TerminalDriver driver{replica, replica};
-        driver.install_crash_handler();
+        my_agent::ui::TerminalSession session{replica, replica};
+        session.install_crash_handler();
         // 故意崩溃。析构函数不会跑，只有信号处理器有机会还原。
         std::raise(SIGSEGV);
         ::_exit(0);  // 到不了这里
@@ -234,6 +305,11 @@ TEST(TerminalTest, RestoresTerminalWhenTheProcessCrashesWithoutUnwinding)
 
     int status = 0;
     ASSERT_EQ(child, ::waitpid(child, &status, 0));
+
+    ASSERT_TRUE(make_nonblocking(primary));
+    const std::string crash_leave = read_available(primary);
+    EXPECT_NE(std::string::npos, crash_leave.find("\x1b[?1006l"));
+    EXPECT_NE(std::string::npos, crash_leave.find("\x1b[?1000l"));
 
     termios after{};
     ASSERT_EQ(0, ::tcgetattr(replica, &after));
@@ -251,7 +327,7 @@ TEST(TerminalTest, RestoresTerminalWhenTheProcessCrashesWithoutUnwinding)
 // 之后每一次差分都建立在假前提上，而且这种残留不会自愈。
 // 用管道模拟：读端关掉后写入立即失败。
 // Red 原因：仓库尚不存在 render()（编译错误）。
-TEST(TerminalTest, RenderReportsFailureSoTheCallerDoesNotCommitAnUnwrittenFrame)
+TEST(TerminalTest, RenderReportsFailureSoTheCallerDoesNotCommitAnUnwrittenScreen)
 {
     PipeFds pipe;
     ASSERT_TRUE(pipe.open());
@@ -260,19 +336,23 @@ TEST(TerminalTest, RenderReportsFailureSoTheCallerDoesNotCommitAnUnwrittenFrame)
     // SIGPIPE 默认会杀掉进程，这里要的是 write 返回 -1。
     const auto previous = std::signal(SIGPIPE, SIG_IGN);
 
-    my_agent::ui::TerminalDriver driver{pipe.write_fd, pipe.write_fd};
-    const my_agent::ui::Frame frame{.lines = {{.text = "content"}}};
+    my_agent::ui::TerminalSession session{pipe.write_fd, pipe.write_fd};
+    my_agent::ui::Painter painter;
+    const my_agent::ui::ScreenConfig screen = screen_with_text("content");
+    const my_agent::ui::WriteSink writer = [&session](std::string_view bytes) {
+        return session.write_all(bytes);
+    };
 
-    EXPECT_FALSE(driver.render(frame));
+    EXPECT_FALSE(painter.render(screen, session.size(), writer));
 
     std::signal(SIGPIPE, previous);
 }
 
 // 场景：同一帧连续两次成功渲染。
-// 领域语义：TerminalDriver::render 是 Maya FrameBuffer 的提交边界。第一次写成功后必须
-// commit，front_ 才代表终端真实画面；第二次渲染相同 Frame 时 Maya diff 不应重画正文。
+// 领域语义：Painter::render 是 Maya FrameBuffer 的提交边界。第一次写成功后必须
+// commit，front_ 才代表终端真实画面；第二次渲染相同 Screen 时 Maya diff 不应重画正文。
 // Red 原因：旧自有字节生成路径每次都全帧输出，因此第二次仍会包含哨兵正文。
-TEST(TerminalTest, RenderCommitsSuccessfulMayaFrameSoIdenticalFrameDoesNotRedrawContent)
+TEST(TerminalTest, RenderCommitsSuccessfulMayaScreenSoIdenticalScreenDoesNotRedrawContent)
 {
     constexpr const char* kSentinel = "TERMINALMAYACOMMIT7F3A";
 
@@ -280,34 +360,20 @@ TEST(TerminalTest, RenderCommitsSuccessfulMayaFrameSoIdenticalFrameDoesNotRedraw
     ASSERT_TRUE(pipe.open());
     ASSERT_TRUE(make_nonblocking(pipe.read_fd));
 
-    my_agent::ui::TerminalDriver driver{pipe.write_fd, pipe.write_fd};
-    const my_agent::ui::Frame frame{.lines = {{.text = kSentinel}}};
+    my_agent::ui::TerminalSession session{pipe.write_fd, pipe.write_fd};
+    my_agent::ui::Painter painter;
+    const my_agent::ui::ScreenConfig screen = screen_with_text(kSentinel);
+    const my_agent::ui::WriteSink writer = [&session](std::string_view bytes) {
+        return session.write_all(bytes);
+    };
 
-    ASSERT_TRUE(driver.render(frame));
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string first = read_available(pipe.read_fd);
     ASSERT_NE(std::string::npos, first.find(kSentinel)) << first;
 
-    ASSERT_TRUE(driver.render(frame));
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string second = read_available(pipe.read_fd);
     EXPECT_EQ(std::string::npos, second.find(kSentinel)) << second;
-}
-
-TEST(TerminalTest, RendersTheFrameCursorAtTheInputPosition)
-{
-    PipeFds pipe;
-    ASSERT_TRUE(pipe.open());
-    ASSERT_TRUE(make_nonblocking(pipe.read_fd));
-
-    my_agent::ui::TerminalDriver driver{pipe.write_fd, pipe.write_fd};
-    const my_agent::ui::Frame frame{
-        .lines = {{.text = "input"}, {.text = "tail"}},
-        .cursor = my_agent::ui::CursorPosition{.row = 1, .column = 2},
-    };
-
-    ASSERT_TRUE(driver.render(frame));
-    const std::string bytes = read_available(pipe.read_fd);
-    EXPECT_NE(std::string::npos, bytes.find("\x1b[?25h")) << bytes;
-    EXPECT_NE(std::string::npos, bytes.find("\x1b[2;3H")) << bytes;
 }
 
 // 场景：Maya 已经算出这一帧，但输出 fd 当时写不进去。
@@ -323,17 +389,21 @@ TEST(TerminalTest, RenderSkipsMayaCommitWhenTheWriteFails)
     ASSERT_TRUE(make_nonblocking(pipe.write_fd));
     ASSERT_TRUE(fill_until_would_block(pipe.write_fd));
 
-    my_agent::ui::TerminalDriver driver{pipe.write_fd, pipe.write_fd};
-    const my_agent::ui::Frame frame{.lines = {{.text = kSentinel}}};
+    my_agent::ui::TerminalSession session{pipe.write_fd, pipe.write_fd};
+    my_agent::ui::Painter painter;
+    const my_agent::ui::ScreenConfig screen = screen_with_text(kSentinel);
+    const my_agent::ui::WriteSink writer = [&session](std::string_view bytes) {
+        return session.write_all(bytes);
+    };
 
-    ASSERT_FALSE(driver.render(frame));
+    ASSERT_FALSE(painter.render(screen, session.size(), writer));
     static_cast<void>(read_available(pipe.read_fd));
 
-    ASSERT_TRUE(driver.render(frame));
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string retry = read_available(pipe.read_fd);
     EXPECT_NE(std::string::npos, retry.find(kSentinel)) << retry;
 
-    ASSERT_TRUE(driver.render(frame));
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string settled = read_available(pipe.read_fd);
     EXPECT_EQ(std::string::npos, settled.find(kSentinel)) << settled;
 }
@@ -368,8 +438,12 @@ TEST(TerminalTest, WideningTheTerminalLeavesNoGhostCellsFromTheOldWidth)
     ASSERT_TRUE(make_nonblocking(primary));
 
     const my_agent::ui::ScreenConfig screen{};
-    my_agent::ui::TerminalDriver driver{replica, replica};
-    ASSERT_TRUE(driver.render(screen));
+    my_agent::ui::TerminalSession session{replica, replica};
+    my_agent::ui::Painter painter;
+    const my_agent::ui::WriteSink writer = [&session](std::string_view bytes) {
+        return session.write_all(bytes);
+    };
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string first_frame = read_available(primary);
 
     my_agent::test::VirtualTerminal terminal{20, 8};
@@ -404,7 +478,7 @@ TEST(TerminalTest, WideningTheTerminalLeavesNoGhostCellsFromTheOldWidth)
     ASSERT_FALSE(terminal.cell_blank(stale_row, stale_col))
         << "保留式 resize 应留下旧内容：量具自身不成立";
 
-    ASSERT_TRUE(driver.render(screen));
+    ASSERT_TRUE(painter.render(screen, session.size(), writer));
     const std::string second_frame = read_available(primary);
     ASSERT_FALSE(second_frame.empty()) << "加宽后的重绘一个字节都没发";
 
@@ -445,8 +519,8 @@ TEST(TerminalTest, FallsBackToAUsableSizeWhenTheTerminalHasNone)
     const int devnull = ::open("/dev/null", O_WRONLY);
     ASSERT_LE(0, devnull);
 
-    const my_agent::ui::TerminalDriver driver{devnull, devnull};
-    const my_agent::ui::Size size = driver.size();
+    const my_agent::ui::TerminalSession session{devnull, devnull};
+    const my_agent::ui::Size size = session.size();
 
     EXPECT_LT(0, size.columns);
     EXPECT_LT(0, size.rows);

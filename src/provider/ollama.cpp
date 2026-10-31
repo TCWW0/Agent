@@ -1,4 +1,5 @@
 #include "my_agent/provider/ollama.hpp"
+#include "my_agent/provider/error.hpp"
 
 #include "my_agent/domain/conversation.hpp"
 #include "my_agent/runtime/msg.hpp"
@@ -7,6 +8,7 @@
 
 #include <string>
 #include <string_view>
+#include <optional>
 #include <utility>
 
 namespace my_agent::provider::ollama {
@@ -89,6 +91,7 @@ void StreamStats::record(
     eval_duration_nanoseconds_.store(
         eval_duration_nanoseconds, std::memory_order_relaxed
     );
+    generation_.fetch_add(1, std::memory_order_relaxed);
     available_.store(true, std::memory_order_release);
 }
 
@@ -106,12 +109,15 @@ StreamStats::Snapshot StreamStats::snapshot() const noexcept
     const double tokens_per_second = eval_duration_seconds > 0.0
         ? static_cast<double>(eval_count) / eval_duration_seconds
         : 0.0;
+    const std::uint64_t generation =
+        generation_.load(std::memory_order_relaxed);
     return Snapshot{
         .available = available,
         .prompt_eval_count = prompt_eval_count,
         .eval_count = eval_count,
         .eval_duration_seconds = eval_duration_seconds,
         .tokens_per_second = tokens_per_second,
+        .generation = generation,
     };
 }
 
@@ -120,7 +126,7 @@ StreamDecoder::StreamDecoder(std::shared_ptr<StreamStats> stats)
 {
 }
 
-void StreamDecoder::feed(std::string_view chunk, const EventSink& sink)
+void StreamDecoder::feed(std::string_view chunk, const ProviderEventSink& sink)
 {
     line_buf_.append(chunk);
 
@@ -139,11 +145,22 @@ void StreamDecoder::feed(std::string_view chunk, const EventSink& sink)
     line_buf_.erase(0, start);
 }
 
-void StreamDecoder::process_line(std::string_view line, const EventSink& sink)
+void StreamDecoder::process_line(std::string_view line, const ProviderEventSink& sink)
 {
     const nlohmann::json frame = nlohmann::json::parse(line, nullptr, false);
     if (frame.is_discarded() || !frame.is_object()) {
         return;  // 空行或心跳，跳过
+    }
+
+    const auto error = frame.find("error");
+    if (error != frame.end()) {
+        const auto normalized = normalize_error(
+            "ollama", 0, frame.dump());
+        sink(ProviderEvent{StreamError{
+            .message = normalized.message,
+            .provider_error = normalized.metadata,
+        }});
+        return;
     }
 
     const auto message = frame.find("message");
@@ -158,7 +175,7 @@ void StreamDecoder::process_line(std::string_view line, const EventSink& sink)
                     continue;
                 }
 
-                sink(Msg{StreamToolCall{
+                sink(ProviderEvent{StreamToolCall{
                     .id = call.value("id", std::string{}),
                     .name = function->value("name", std::string{}),
                     .args = function->value("arguments", nlohmann::json::object()),
@@ -169,23 +186,53 @@ void StreamDecoder::process_line(std::string_view line, const EventSink& sink)
         // 终态帧也带一个空 content，投出空 delta 只会在 Model 里留噪声。
         const std::string content = message->value("content", std::string{});
         if (!content.empty()) {
-            sink(Msg{StreamTextDelta{.text = content}});
+            sink(ProviderEvent{StreamTextDelta{.text = content}});
         }
     }
 
     if (frame.value("done", false)) {
-        if (stats_) {
+        const auto input_count = frame.find("prompt_eval_count");
+        const auto output_count = frame.find("eval_count");
+        const bool has_complete_usage = input_count != frame.end()
+            && input_count->is_number_unsigned()
+            && output_count != frame.end()
+            && output_count->is_number_unsigned();
+        std::optional<std::uint64_t> cached_input_tokens;
+        for (const std::string_view key : {
+            std::string_view{"prompt_eval_cached_count"},
+            std::string_view{"cached_prompt_eval_count"},
+            std::string_view{"prompt_eval_cache_count"},
+        }) {
+            const auto it = frame.find(key);
+            if (it != frame.end() && it->is_number_unsigned()) {
+                cached_input_tokens = it->get<std::uint64_t>();
+                break;
+            }
+        }
+
+        if (stats_ && has_complete_usage) {
             stats_->record(
-                frame.value("prompt_eval_count", std::uint64_t{0}),
-                frame.value("eval_count", std::uint64_t{0}),
+                input_count->get<std::uint64_t>(),
+                output_count->get<std::uint64_t>(),
                 frame.value("eval_duration", std::uint64_t{0})
             );
         }
-        sink(Msg{StreamFinished{}});
+        if (has_complete_usage) {
+            sink(ProviderEvent{RequestUsage{
+                .input_tokens = input_count->get<std::uint64_t>(),
+                .cached_input_tokens = cached_input_tokens,
+                .output_tokens = output_count->get<std::uint64_t>(),
+                .quality = UsageQuality::Exact,
+            }});
+        }
+        sink(ProviderEvent{StreamFinished{}});
     }
 }
 
-std::string build_request_body(std::string_view model, const Request& request)
+std::string build_request_body(
+    std::string_view model,
+    const Request& request,
+    std::optional<std::size_t> num_ctx)
 {
     nlohmann::json messages = nlohmann::json::array();
 
@@ -212,6 +259,14 @@ std::string build_request_body(std::string_view model, const Request& request)
     if (!request.tools.empty()) {
         body["tools"] = encode_tools(request.tools);
     }
+    nlohmann::json options = nlohmann::json::object();
+    if (num_ctx) {
+        options["num_ctx"] = *num_ctx;
+    }
+    options["num_predict"] = request.max_output_tokens;
+    if (!options.empty()) {
+        body["options"] = std::move(options);
+    }
 
     return body.dump();
 }
@@ -221,7 +276,8 @@ StreamEffect make_stream(
     int port,
     std::string model,
     std::shared_ptr<http::HttpClient> client,
-    std::shared_ptr<StreamStats> stats
+    std::shared_ptr<StreamStats> stats,
+    std::optional<std::size_t> num_ctx
 )
 {
     return [
@@ -229,14 +285,15 @@ StreamEffect make_stream(
         port,
         model = std::move(model),
         client = std::move(client),
-        stats = std::move(stats)
-    ](Request request, EventSink sink) {
+        stats = std::move(stats),
+        num_ctx
+    ](Request request, ProviderEventSink sink) {
         const http::HttpRequest wire{
             .host = host,
             .port = port,
             .path = "/api/chat",
             .headers = {{"Content-Type", "application/json"}},
-            .body = build_request_body(model, request),
+            .body = build_request_body(model, request, num_ctx),
             .use_tls = false,
         };
 
@@ -252,7 +309,12 @@ StreamEffect make_stream(
         // 宿主要求每次 stream 调用恰好投出一个终态事件。成功路径上 done==true
         // 的帧已经投过 StreamFinished，失败路径在这里补 StreamError。
         if (!result) {
-            sink(Msg{StreamError{.message = result.error().message}});
+            const auto normalized = normalize_error(
+                "ollama", result.error().status, result.error().message);
+            sink(ProviderEvent{StreamError{
+                .message = normalized.message,
+                .provider_error = normalized.metadata,
+            }});
         }
     };
 }

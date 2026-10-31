@@ -1,264 +1,1026 @@
 #include "my_agent/runtime/agent.hpp"
 
 #include "my_agent/domain/conversation.hpp"
-#include "my_agent/provider/provider.hpp"
+#include "my_agent/provider/request.hpp"
+#include "my_agent/runtime/compaction.hpp"
+#include "my_agent/runtime/context_projection.hpp"
+#include "my_agent/runtime/identity.hpp"
 #include "my_agent/runtime/model.hpp"
 #include "my_agent/runtime/msg.hpp"
 #include "my_agent/tool/policy.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_protocol.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <optional>
+#include <iterator>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
-namespace my_agent{
-    namespace {
-        Request make_request(const Thread& thread)
-        {
-            std::vector<ToolSpec> specs;
-            specs.reserve(tool::registry().size());
-            for (const tool::ToolDef& definition : tool::registry()) {
-                specs.push_back(ToolSpec{
-                    .name = definition.name,
-                    .description = definition.description,
-                    .input_schema = definition.input_schema,
-                });
-            }
+namespace my_agent {
+namespace {
 
-            return Request{
-                .messages = thread.messages,
-                .tools = std::move(specs),
-            };
-        }
+TurnId allocate_turn(Model& model)
+{
+    return TurnId{model.session.ids.next_turn++};
+}
 
-        Cmd kick_pending_tools(Model& model)
-        {
-            if (model.thread.messages.empty()){
-                model.phase = Idle{};
-                return NoCommand{};
-            }
+MessageId allocate_message(Model& model)
+{
+    return MessageId{model.session.ids.next_message++};
+}
 
-            Message& assistant = model.thread.messages.back();
+StreamId allocate_stream(Model& model)
+{
+    return StreamId{model.session.ids.next_stream++};
+}
 
-            for (ToolCall& tool_call : assistant.tool_calls) {
-                if (!tool_call.is_pending()) {
-                    continue;
-                }
+PreparationId allocate_preparation(Model& model)
+{
+    return PreparationId{model.session.ids.next_preparation++};
+}
 
-                const tool::ToolDef* definition = tool::find(tool_call.name);
-                const bool needs_permission = definition != nullptr
-                    && tool::policy::permission(
-                        definition->effects,
-                        model.profile
-                    ) == tool::policy::Decision::Prompt;
+CompactionId allocate_compaction(Model& model)
+{
+    return CompactionId{model.session.ids.next_compaction++};
+}
 
-                if (needs_permission) {
-                    model.pending_permission = PendingPermission{
-                        .id = tool_call.id,
-                    };
-                    model.phase = AwaitingPermission{};
-                    return NoCommand{};
-                }
+ToolExecId allocate_tool_exec(Model& model)
+{
+    return ToolExecId{model.session.ids.next_tool_exec++};
+}
 
-                model.phase = ExecutingTool{
-                    .id = tool_call.id,
-                };
-                return RunTool{
-                    .id = tool_call.id,
-                    .name = tool_call.name,
-                    .args = tool_call.args,
-                };
-            }
-
-            if (assistant.tool_calls.empty()) {
-                model.phase = Idle{};
-                return NoCommand{};
-            }
-
-            Request request = make_request(model.thread);
-            model.thread.messages.push_back(Message{
-                .role = Role::Assistant,
-                .text = {},
-            });
-            model.phase = Streaming{};
-            return StartStream{.request = std::move(request)};
-        }
-
-        /*
-        * 对于一个apply函数，对应的期望是负责将被类型确定后的Msg往model其中的队列投递，并且保证对应model状态的正确转变
-        */
-
-        // 对于一个 Submit 类型的信息，对应的只需要将消息压到对应的队列中去并且更新一个流式传输状态即可
-        Cmd apply(Model& model,const Submit& submit)
-        {
-            model.thread.messages.push_back(Message{
-                .role = my_agent::Role::User,
-                .text = submit.text,
-            });
-
-            Request request = make_request(model.thread);
-
-            model.thread.messages.push_back(Message{
-                .role = my_agent::Role::Assistant,
-                .text = {}
-            });
-            model.phase = Streaming{};
-            return StartStream{.request = std::move(request)};
-        }
-
-        Cmd apply(Model& model,const StreamTextDelta& delta)
-        {
-            my_agent::Thread& thread = model.thread;
-            my_agent::Message& latest_msg = thread.messages.back();
-            latest_msg.text += delta.text;
-            return NoCommand{};
-        }
-
-        Cmd apply(Model& model,const StreamToolCall& event)
-        {
-            Message& assistant = model.thread.messages.back();
-            assistant.tool_calls.push_back(ToolCall{
-                .id = event.id,
-                .name = event.name,
-                .args = event.args,
-            });
-            return NoCommand{};
-        }
-
-        Cmd apply(Model& model,const StreamFinished&)
-        {
-            if (!std::holds_alternative<Streaming>(model.phase)) {
-                return NoCommand{};
-            }
-            return kick_pending_tools(model);
-        }
-
-        Cmd apply(Model& model,const StreamError& err)
-        {
-            model.phase = my_agent::Idle{};
-            my_agent::Message& latest_msg = model.thread.messages.back();
-            latest_msg.error = err.message;
-            return NoCommand{};
-        }
-
-        Cmd apply(Model& model,const ToolExecOutput& event)
-        {
-            ToolCall* matched_call = nullptr;
-            for (auto message_it = model.thread.messages.rbegin();
-                message_it != model.thread.messages.rend(); ++message_it) {
-                for (auto call_it = message_it->tool_calls.rbegin();
-                    call_it != message_it->tool_calls.rend(); ++call_it) {
-                    if (call_it->id == event.id) {
-                        matched_call = &*call_it;
-                        break;
-                    }
-                }
-                if (matched_call != nullptr) {
-                    break;
-                }
-            }
-
-            if (matched_call == nullptr) {
-                return NoCommand{};
-            }
-
-            if (event.result) {
-                matched_call->status = ToolCall::Done{
-                    .output = event.result->text,
-                };
-            } else {
-                matched_call->status = ToolCall::Failed{
-                    .output = event.result.error().render(),
-                };
-            }
-            return kick_pending_tools(model);
-        }
-
-        Cmd apply(Model& model,const SetProfile& event)
-        {
-            model.profile = event.profile;
-            return NoCommand{};
-        }
-
-        Cmd apply(Model& model,const PermissionApprove& event)
-        {
-            if (!std::holds_alternative<AwaitingPermission>(model.phase)
-                || !model.pending_permission
-                || model.pending_permission->id != event.id
-                || model.thread.messages.empty()) {
-                return NoCommand{};
-            }
-
-            Message& assistant = model.thread.messages.back();
-            if (assistant.role != Role::Assistant) {
-                return NoCommand{};
-            }
-
-            for (ToolCall& toolcall : assistant.tool_calls) {
-                if (toolcall.id != event.id || !toolcall.is_pending()) {
-                    continue;
-                }
-
-                RunTool command{
-                    .id = toolcall.id,
-                    .name = toolcall.name,
-                    .args = toolcall.args,
-                };
-
-                model.pending_permission.reset();
-                model.phase = ExecutingTool{
-                    .id = toolcall.id,
-                };
-
-                return command;
-            }
-            return NoCommand{};
-        }
-
-        Cmd apply(Model& model,const PermissionReject& event)
-        {
-            if (!std::holds_alternative<AwaitingPermission>(model.phase)
-                || !model.pending_permission
-                || model.pending_permission->id != event.id
-                || model.thread.messages.empty()) {
-                return NoCommand{};
-            }
-            Message& assistant = model.thread.messages.back();
-            if (assistant.role != Role::Assistant) {
-                return NoCommand{};
-            }
-            for (ToolCall& toolcall : assistant.tool_calls) {
-                if (toolcall.id != event.id || !toolcall.is_pending()) {
-                    continue;
-                }
-
-                std::string output{"User rejected this tool call."};
-
-                if (event.feedback && !event.feedback->empty()) {
-                    output += " Feedback: ";
-                    output += *event.feedback;
-                }
-
-                toolcall.status = ToolCall::Rejected{
-                    .output = std::move(output),
-                };
-
-                model.pending_permission.reset();
-            }
-            return kick_pending_tools(model);
+Message* message_for(Model& model, MessageId id)
+{
+    if (id.value == 0) {
+        return nullptr;
+    }
+    for (Message& message : model.domain.thread.messages) {
+        if (message.id == id) {
+            return &message;
         }
     }
+    return nullptr;
+}
 
-    Step update(Model model,Msg msg)
-    {
-        Cmd cmd = std::visit(
-            [&model](const auto& event) -> Cmd{
-                return apply(model,event);
-            },
-            msg
-        );
-        return Step{
-            .model = std::move(model),
-            .cmd = std::move(cmd),
+bool stream_event_matches(const Streaming& active, StreamRef ref)
+{
+    return is_valid(ref) && active.ref == ref;
+}
+
+Cmd drive(Model& model);
+void block_context_limit(
+    Model& model,
+    std::string message,
+    std::optional<ContextBlockDetail> detail =
+        ContextBlockDetail::RequestTooLarge,
+    Message* assistant = nullptr,
+    std::optional<ContextBudgetAssessment> budget = {});
+
+ContextBlockDetail detail_for_plan_failure(
+    CompactionPlanFailureKind kind)
+{
+    return kind == CompactionPlanFailureKind::NoCompleteHistory
+        ? ContextBlockDetail::NoCompleteHistory
+        : ContextBlockDetail::CompactionSourceTooLarge;
+}
+
+ContextBlockDetail detail_for_validation_failure(
+    CompactionFailureKind kind)
+{
+    return kind == CompactionFailureKind::Projection
+            || kind == CompactionFailureKind::NoGain
+        ? ContextBlockDetail::CompactionInsufficient
+        : ContextBlockDetail::CompactionFailed;
+}
+
+PrepareRequest start_request_preparation(
+    Model& model,
+    TurnId turn_id,
+    RequestPurpose purpose,
+    Request request,
+    MessageId queued_message_id = {},
+    MessageId assistant_message_id = {})
+{
+    const PreparationId preparation_id = allocate_preparation(model);
+    model.phase = PreparingRequest{
+        .turn_id = turn_id,
+        .preparation_id = preparation_id,
+        .purpose = purpose,
+        .queued_message_id = queued_message_id,
+        .assistant_message_id = assistant_message_id,
+    };
+    return PrepareRequest{
+        .preparation_id = preparation_id,
+        .request = std::move(request),
+        .provider_name = model.domain.provider_name,
+        .provider_model = model.domain.provider_model,
+        .policy = model.domain.context_management_config,
+        .ledger = model.session.projection_ledger,
+    };
+}
+
+std::optional<Request> request_for_preparation(
+    const Model& model,
+    const PreparingRequest& preparing)
+{
+    Request request = canonical_request(model.domain.thread);
+    if (preparing.purpose != RequestPurpose::QueuedTurn) {
+        return request;
+    }
+    const auto item = std::find_if(
+        model.session.queued_messages.begin(),
+        model.session.queued_messages.end(),
+        [&preparing](const QueuedMessage& queued) {
+            return queued.turn_id == preparing.turn_id
+                && queued.message_id == preparing.queued_message_id;
+        });
+    if (item == model.session.queued_messages.end()) {
+        return std::nullopt;
+    }
+    request.messages.push_back(Message{
+        .role = Role::User,
+        .text = item->text,
+        .id = item->message_id,
+        .turn_id = item->turn_id,
+    });
+    return request;
+}
+
+Cmd start_compaction(
+    Model& model,
+    CompactionPlan plan)
+{
+    const RequestFingerprint request_fingerprint = fingerprint_request(
+        plan.provider_model,
+        plan.compaction_request);
+    model.phase = Compacting{
+        .plan = plan,
+    };
+    return StartCompaction{
+        .compaction_id = plan.compaction_id,
+        .request = std::move(plan.compaction_request),
+        .request_fingerprint = request_fingerprint,
+    };
+}
+
+Cmd finish_compaction_failure(
+    Model& model,
+    const Compacting& active,
+    ContextBlockDetail detail)
+{
+    model.session.last_failed_compaction = FailedCompactionAttempt{
+        .source_digest = active.plan.source_digest,
+        .detail = detail,
+    };
+    model.phase = Idle{};
+    return drive(model);
+}
+
+Cmd drive(Model& model)
+{
+    if (!std::holds_alternative<Idle>(model.phase)
+        || model.session.queued_messages.empty()) {
+        return NoCommand{};
+    }
+
+    const QueuedMessage& item = model.session.queued_messages.front();
+    Request request = canonical_request(model.domain.thread);
+    request.messages.push_back(Message{
+        .role = Role::User,
+        .text = item.text,
+        .id = item.message_id,
+        .turn_id = item.turn_id,
+    });
+    return start_request_preparation(
+        model,
+        item.turn_id,
+        RequestPurpose::QueuedTurn,
+        std::move(request),
+        item.message_id);
+}
+
+Cmd finish_turn(Model& model)
+{
+    model.phase = Idle{};
+    return drive(model);
+}
+
+std::optional<MessageId> active_assistant(const Model& model)
+{
+    return std::visit(
+        [](const auto& phase) -> std::optional<MessageId> {
+            using Phase = std::decay_t<decltype(phase)>;
+            if constexpr (std::is_same_v<Phase, Streaming>) {
+                return phase.target_message_id;
+            } else if constexpr (std::is_same_v<Phase, AwaitingPermission>) {
+                return phase.call.assistant_message_id;
+            } else if constexpr (std::is_same_v<Phase, ExecutingTool>) {
+                return phase.call.assistant_message_id;
+            } else {
+                return std::nullopt;
+            }
+        },
+        model.phase);
+}
+
+void block_context_limit(
+    Model& model,
+    std::string message,
+    std::optional<ContextBlockDetail> detail,
+    Message* assistant,
+    std::optional<ContextBudgetAssessment> budget)
+{
+    if (assistant != nullptr) {
+        assistant->error = message;
+    }
+    model.phase = Blocked{
+        .reason = BlockReason::ContextLimit,
+        .context_detail = detail,
+        .budget = std::move(budget),
+        .message = std::move(message),
+    };
+}
+
+bool rollback_empty_queued_turn(
+    Model& model,
+    const Streaming& active)
+{
+    if (active.purpose != RequestPurpose::QueuedTurn) {
+        return false;
+    }
+    Message* assistant = message_for(model, active.target_message_id);
+    if (assistant == nullptr
+        || !assistant->text.empty()
+        || !assistant->tool_calls.empty()) {
+        return false;
+    }
+    auto assistant_position = model.domain.thread.messages.end();
+    for (auto it = model.domain.thread.messages.begin();
+         it != model.domain.thread.messages.end(); ++it) {
+        if (it->id == active.target_message_id) {
+            assistant_position = it;
+            break;
+        }
+    }
+    if (assistant_position == model.domain.thread.messages.end()
+        || assistant_position == model.domain.thread.messages.begin()
+        || std::next(assistant_position) != model.domain.thread.messages.end()) {
+        return false;
+    }
+    auto user_position = std::prev(assistant_position);
+    if (user_position->role != Role::User
+        || user_position->turn_id != active.ref.turn_id) {
+        return false;
+    }
+    const QueuedMessage item{
+        .turn_id = user_position->turn_id,
+        .message_id = user_position->id,
+        .text = user_position->text,
+    };
+    model.domain.thread.messages.erase(user_position, model.domain.thread.messages.end());
+    model.session.queued_messages.push_front(item);
+    return true;
+}
+
+Cmd kick_pending_tools(Model& model)
+{
+    const std::optional<MessageId> assistant_id = active_assistant(model);
+    if (!assistant_id) {
+        return NoCommand{};
+    }
+    Message* assistant = message_for(model, *assistant_id);
+    if (assistant == nullptr || assistant->role != Role::Assistant) {
+        return NoCommand{};
+    }
+
+    for (ToolCall& toolcall : assistant->tool_calls) {
+        if (!toolcall.is_pending()) {
+            continue;
+        }
+        const auto* pending = std::get_if<ToolCall::Pending>(&toolcall.status);
+        if (pending == nullptr || pending->binding.ref.value == 0) {
+            model.phase = Blocked{
+                .reason = BlockReason::InvalidConfiguration,
+                .message = "pending tool call has no resolved binding",
+            };
+            return NoCommand{};
+        }
+
+        const bool need_permission = tool::policy::permission(
+            pending->binding.effects, model.domain.profile) == tool::policy::Decision::Prompt;
+
+        if (need_permission) {
+            model.phase = AwaitingPermission{
+                .call = ToolCallRef{
+                    .assistant_message_id = assistant->id,
+                    .tool_exec_id = toolcall.tool_exec_id,
+                },
+            };
+            return NoCommand{};
+        }
+
+        const ToolCallRef call_ref{
+            .assistant_message_id = assistant->id,
+            .tool_exec_id = toolcall.tool_exec_id,
+        };
+        model.phase = ExecutingTool{
+            .call = call_ref,
+        };
+        return RunTool{
+            .call = call_ref,
+            .ref = pending->binding.ref,
+            .args = toolcall.args,
         };
     }
+
+    if (assistant->tool_calls.empty()) {
+        return finish_turn(model);
+    }
+    return start_request_preparation(model,
+        ToolContinuationRequest{
+            .turn_id = assistant->turn_id,
+            .previous_assistant_id = assistant->id,
+        });
 }
+
+Cmd apply(Model& model, const Submit& submit)
+{
+    const TurnId turn_id = allocate_turn(model);
+    const MessageId message_id = allocate_message(model);
+    model.session.queued_messages.push_back(QueuedMessage{
+        .turn_id = turn_id,
+        .message_id = message_id,
+        .text = submit.text,
+    });
+    return drive(model);
+}
+
+Cmd apply(Model& model, const RequestCompaction&)
+{
+    if (!std::holds_alternative<Idle>(model.phase)
+        || !model.session.queued_messages.empty()
+        ) {
+        return NoCommand{};
+    }
+
+    Request next_request = canonical_request(model.domain.thread);
+    const auto planned = make_compaction_plan(
+        allocate_compaction(model),
+        model.domain.thread,
+        next_request,
+        model.domain.provider_model,
+        model.domain.context_management_config);
+    if (!planned) {
+        const ContextBlockDetail detail = detail_for_plan_failure(
+            planned.error().kind);
+        model.session.last_failed_compaction = FailedCompactionAttempt{
+            .source_digest = planned.error().source_digest,
+            .detail = detail,
+        };
+        return NoCommand{};
+    }
+    return start_compaction(
+        model, *planned);
+}
+
+Cmd apply(Model& model, const StreamTextDelta& delta)
+{
+    const auto* active = std::get_if<Streaming>(&model.phase);
+    if (active == nullptr
+        || !stream_event_matches(*active, delta.ref)) {
+        return NoCommand{};
+    }
+
+    Message* assistant = message_for(model, active->target_message_id);
+    if (assistant == nullptr || assistant->role != Role::Assistant) {
+        return NoCommand{};
+    }
+    assistant->text += delta.text;
+    if (!delta.text.empty()) {
+        model.session.stream_telemetry.output_bytes += delta.text.size();
+        ++model.session.stream_telemetry.generation;
+    }
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const ResolvedStreamToolCall& event)
+{
+    const auto* active = std::get_if<Streaming>(&model.phase);
+    if (active == nullptr || !stream_event_matches(*active, event.ref)){
+        return NoCommand{};
+    }
+    Message* assistant = message_for(model, active->target_message_id);
+    if (assistant == nullptr || assistant->role != Role::Assistant) {
+        return NoCommand{};
+    }
+    for (const ToolCall& existing : assistant->tool_calls) {
+        if (existing.id == event.id) {
+            return NoCommand{};
+        }
+    }
+
+    const ToolExecId tool_exec_id = allocate_tool_exec(model);
+    ToolCall call{
+        .id = event.id,
+        .name = event.name,
+        .args = event.args,
+        .status = std::visit(
+            [](const auto& resolution) -> ToolCall::Status {
+                using Resolution = std::decay_t<decltype(resolution)>;
+                if constexpr (std::is_same_v<Resolution, tool::ToolBinding>) {
+                    return ToolCall::Pending{.binding = resolution};
+                } else {
+                    return ToolCall::Failed{.output = resolution.message};
+                }
+            },
+            event.resolution),
+        .tool_exec_id = tool_exec_id,
+    };
+    assistant->tool_calls.push_back(std::move(call));
+
+    const std::size_t argument_bytes = event.args.dump().size();
+    if (argument_bytes > 0){
+        model.session.stream_telemetry.output_bytes += argument_bytes;
+        ++model.session.stream_telemetry.generation;
+    }
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const StreamFinished& event)
+{
+    auto* active = std::get_if<Streaming>(&model.phase);
+    if (active == nullptr
+        || !stream_event_matches(*active, event.ref)) {
+        return NoCommand{};
+    }
+    if (!active->usage_accepted) {
+        model.session.usage.mark_request_unavailable(active->ref, active->projection_receipt.fingerprint);
+        active->usage_accepted = true;
+    }
+    return kick_pending_tools(model);
+}
+
+Cmd apply(Model& model, const RequestUsage& event)
+{
+    if (auto* compacting = std::get_if<Compacting>(&model.phase);
+        compacting != nullptr) {
+        if (!is_valid(compacting->plan.compaction_id)
+            || compacting->usage_accepted
+            || event.operation != OperationRef{compacting->plan.compaction_id}
+            || event.request_fingerprint
+                != fingerprint_request(
+                    compacting->plan.provider_model,
+                    compacting->plan.compaction_request)) {
+            return NoCommand{};
+        }
+
+        model.session.usage.record_accepted(event);
+        compacting->usage_accepted = true;
+        return NoCommand{};
+    }
+
+    auto* active = std::get_if<Streaming>(&model.phase);
+    if (active == nullptr
+        || !is_valid(active->ref)
+        || active->usage_accepted
+        || event.operation != OperationRef{active->ref}
+        || event.request_fingerprint != active->request_fingerprint) {
+        return NoCommand{};
+    }
+
+    active->usage_accepted = true;
+    if (event.quality == UsageQuality::Exact
+        && !active->projection_receipt.segments.empty()) {
+        record_exact_usage(
+            model.session.projection_ledger,
+            active->projection_receipt,
+            event.input_tokens,
+            event.output_tokens);
+    }
+    model.session.usage.record_accepted(event);
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const RequestPreparationFailed& event)
+{
+    const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
+    if (preparing == nullptr
+        || event.preparation_id.value == 0
+        || preparing->preparation_id != event.preparation_id) {
+        return NoCommand{};
+    }
+
+    const PreparingRequest active = *preparing;
+    if (active.purpose == RequestPurpose::QueuedTurn) {
+        model.phase = Blocked{
+            .reason = BlockReason::ExplicitResumeRequired,
+            .message = event.message,
+        };
+        return NoCommand{};
+    }
+    if (Message* assistant = message_for(model, active.assistant_message_id)) {
+        assistant->error = event.message;
+    }
+    model.phase = Idle{};
+    return drive(model);
+}
+
+Cmd apply(Model& model, const RequestPrepared& event)
+{
+    const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
+    if (preparing == nullptr
+        || event.preparation_id.value == 0
+        || preparing->preparation_id != event.preparation_id) {
+        return NoCommand{};
+    }
+
+    const PreparingRequest active = *preparing;
+    const ContextProjection& projection = event.snapshot.projection;
+    const ContextBudgetAssessment& budget = event.snapshot.budget;
+    if (active.purpose == RequestPurpose::QueuedTurn
+        && (budget.triggered || !budget.admitted)) {
+        const auto planned = make_compaction_plan(
+            allocate_compaction(model),
+            model.domain.thread,
+            projection.request,
+            budget,
+            model.domain.provider_model,
+            model.domain.context_management_config);
+        if (planned) {
+            const bool same_failed_source =
+                model.session.last_failed_compaction
+                && model.session.last_failed_compaction->source_digest
+                && *model.session.last_failed_compaction->source_digest
+                    == planned->source_digest;
+            if (!same_failed_source) {
+                return start_compaction(
+                    model, *planned);
+            }
+            if (!budget.admitted) {
+                block_context_limit(
+                    model,
+                    "automatic context compaction is suppressed for the same failed source",
+                    model.session.last_failed_compaction->detail,
+                    nullptr,
+                    budget);
+                return NoCommand{};
+            }
+        } else {
+            const ContextBlockDetail detail = detail_for_plan_failure(
+                planned.error().kind);
+            if (planned.error().source_digest) {
+                model.session.last_failed_compaction = FailedCompactionAttempt{
+                    .source_digest = planned.error().source_digest,
+                    .detail = detail,
+                };
+            }
+            if (!budget.admitted) {
+                block_context_limit(
+                    model,
+                    planned.error().message,
+                    detail,
+                    nullptr,
+                    budget);
+                return NoCommand{};
+            }
+        }
+    }
+
+    if (!budget.admitted) {
+        if (active.purpose != RequestPurpose::QueuedTurn) {
+            if (Message* assistant = message_for(
+                    model, active.assistant_message_id)) {
+                assistant->error = "context limit exceeded before request";
+            }
+        }
+        model.phase = Blocked{
+            .reason = BlockReason::ContextLimit,
+            .context_detail = ContextBlockDetail::RequestTooLarge,
+            .budget = budget,
+            .message = "request exceeds the available context budget",
+        };
+        return NoCommand{};
+    }
+
+    MessageId assistant_message_id{};
+    if (active.purpose == RequestPurpose::QueuedTurn) {
+        if (model.session.queued_messages.empty()
+            || model.session.queued_messages.front().turn_id != active.turn_id
+            || model.session.queued_messages.front().message_id
+                != active.queued_message_id) {
+            return NoCommand{};
+        }
+        QueuedMessage item = std::move(model.session.queued_messages.front());
+        model.session.queued_messages.pop_front();
+        model.domain.thread.messages.push_back(Message{
+            .role = Role::User,
+            .text = std::move(item.text),
+            .id = item.message_id,
+            .turn_id = item.turn_id,
+        });
+        model.session.usage.begin_turn(item.turn_id);
+    } else if (active.purpose == RequestPurpose::ToolContinuation) {
+        assistant_message_id = allocate_message(model);
+        model.domain.thread.messages.push_back(Message{
+            .role = Role::Assistant,
+            .text = {},
+            .id = assistant_message_id,
+            .turn_id = active.turn_id,
+        });
+    } else {
+        assistant_message_id = active.assistant_message_id;
+    }
+
+    if (active.purpose == RequestPurpose::QueuedTurn) {
+        assistant_message_id = allocate_message(model);
+        model.domain.thread.messages.push_back(Message{
+            .role = Role::Assistant,
+            .text = {},
+            .id = assistant_message_id,
+            .turn_id = active.turn_id,
+        });
+    }
+
+    const StreamId stream_id = allocate_stream(model);
+    model.phase = Streaming{
+        .ref = StreamRef{.turn_id = active.turn_id, .stream_id = stream_id},
+        .target_message_id = assistant_message_id,
+        .request_fingerprint = projection.fingerprint,
+        .projection_receipt = projection_receipt(projection),
+        .purpose = active.purpose,
+    };
+    model.session.usage.mark_context_pending();
+    model.session.stream_telemetry = {};
+    return StartStream{
+        .ref = StreamRef{.turn_id = active.turn_id, .stream_id = stream_id},
+        .target_message_id = assistant_message_id,
+        .request = projection.request,
+        .request_fingerprint = projection.fingerprint,
+    };
+}
+
+Cmd apply(Model& model, const CompactionDelta& event)
+{
+    auto* active = std::get_if<Compacting>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.compaction_id)
+        || active->plan.compaction_id != event.compaction_id) {
+        return NoCommand{};
+    }
+    active->pending_summary += event.text;
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const CompactionFinished& event)
+{
+    auto* active = std::get_if<Compacting>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.compaction_id)
+        || active->plan.compaction_id != event.compaction_id) {
+        return NoCommand{};
+    }
+
+    const auto validation = validate_compaction(
+        active->plan,
+        active->pending_summary);
+    if (!validation) {
+        return finish_compaction_failure(
+            model,
+            *active,
+            detail_for_validation_failure(validation.error().kind));
+    }
+
+    model.domain.thread.accepted_compaction = *validation;
+    model.session.last_failed_compaction.reset();
+    model.phase = Idle{};
+    return drive(model);
+}
+
+Cmd apply(Model& model, const CompactionError& event)
+{
+    const auto* active = std::get_if<Compacting>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.compaction_id)
+        || active->plan.compaction_id != event.compaction_id) {
+        return NoCommand{};
+    }
+    return finish_compaction_failure(
+        model,
+        *active,
+        ContextBlockDetail::CompactionFailed);
+}
+
+Cmd apply(Model& model, const StreamError& error)
+{
+    const auto* active = std::get_if<Streaming>(&model.phase);
+    if (active == nullptr) {
+        return NoCommand{};
+    }
+
+    const bool provider_context_limit = error.provider_error
+        && error.provider_error->kind == ProviderErrorKind::ContextLimit;
+    if (!stream_event_matches(*active, error.ref)) {
+        return NoCommand{};
+    }
+
+    Message* assistant = message_for(model, active->target_message_id);
+    if (assistant == nullptr || assistant->role != Role::Assistant) {
+        return NoCommand{};
+    }
+
+    if (!active->usage_accepted) {
+        model.session.usage.mark_request_unavailable(active->ref, active->projection_receipt.fingerprint);
+    }
+
+    if (provider_context_limit) {
+        const bool rolled_back = rollback_empty_queued_turn(
+            model, *active);
+        block_context_limit(
+            model,
+            error.message,
+            ContextBlockDetail::RequestTooLarge,
+            rolled_back ? nullptr : assistant);
+        return NoCommand{};
+    }
+
+    if (error.disposition == FailureDisposition::RetryCurrent) {
+        const TurnId turn_id = active->ref.turn_id;
+        const MessageId target_message_id = active->target_message_id;
+        Request request = canonical_request(model.domain.thread);
+        return start_request_preparation(
+            model,
+            turn_id,
+            RequestPurpose::RetryCurrent,
+            std::move(request),
+            {},
+            target_message_id);
+    }
+
+    assistant->error = error.message;
+    if (error.disposition == FailureDisposition::BlockSession) {
+        model.phase = Blocked{
+            .reason = error.block_reason,
+            .message = error.message,
+        };
+        return NoCommand{};
+    }
+    return finish_turn(model);
+}
+
+Cmd apply(Model& model, const ToolExecOutput& event)
+{
+    const auto* active = std::get_if<ExecutingTool>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.call)
+        || active->call != event.call) {
+        return NoCommand{};
+    }
+
+    ToolCall* matched_call = resolve_tool_call(model.domain.thread, event.call);
+    if (matched_call == nullptr || !matched_call->is_pending()) {
+        return NoCommand{};
+    }
+    const auto* pending = std::get_if<ToolCall::Pending>(&matched_call->status);
+    if (pending == nullptr || pending->binding.ref != event.ref) {
+        return NoCommand{};
+    }
+
+    if (event.result) {
+        matched_call->status = ToolCall::Done{
+            .output = event.result->text,
+        };
+    } else {
+        matched_call->status = ToolCall::Failed{
+            .output = event.result.error().render(),
+        };
+    }
+    return kick_pending_tools(model);
+}
+
+Cmd apply(Model& model, const SetProfile& event)
+{
+    model.domain.profile = event.profile;
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const SetRequestPolicy& event)
+{
+    event.policy.validate();
+    model.domain.context_management_config = event.policy;
+    model.domain.provider_name = event.provider_name;
+    model.domain.provider_model = event.provider_model;
+
+    const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
+    if (preparing == nullptr) {
+        return NoCommand{};
+    }
+    const PreparingRequest active = *preparing;
+    std::optional<Request> request = request_for_preparation(model, active);
+    if (!request) {
+        model.phase = Idle{};
+        return drive(model);
+    }
+    return start_request_preparation(
+        model,
+        active.turn_id,
+        active.purpose,
+        std::move(*request),
+        active.queued_message_id,
+        active.assistant_message_id);
+}
+
+Cmd apply(Model& model, const PermissionApprove& event)
+{
+    const auto* active = std::get_if<AwaitingPermission>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.call)
+        || active->call != event.call) {
+        return NoCommand{};
+    }
+
+    ToolCall* toolcall = resolve_tool_call(model.domain.thread, event.call);
+    if (toolcall == nullptr || !toolcall->is_pending()) {
+        return NoCommand{};
+    }
+    const auto& pending = std::get<ToolCall::Pending>(toolcall->status);
+    if (pending.binding.ref.value == 0) {
+        return NoCommand{};
+    }
+    model.phase = ExecutingTool{
+        .call = event.call,
+    };
+    return RunTool{
+        .call = event.call,
+        .ref = pending.binding.ref,
+        .args = toolcall->args,
+    };
+}
+
+Cmd apply(Model& model, const PermissionReject& event)
+{
+    const auto* active = std::get_if<AwaitingPermission>(&model.phase);
+    if (active == nullptr
+        || !is_valid(event.call)
+        || active->call != event.call) {
+        return NoCommand{};
+    }
+
+    ToolCall* toolcall = resolve_tool_call(model.domain.thread, event.call);
+    if (toolcall == nullptr || !toolcall->is_pending()) {
+        return NoCommand{};
+    }
+
+    std::string output{"User rejected this tool call."};
+    if (event.feedback && !event.feedback->empty()) {
+        output += " Feedback: ";
+        output += *event.feedback;
+    }
+    toolcall->status = ToolCall::Rejected{.output = std::move(output)};
+    return kick_pending_tools(model);
+}
+
+Cmd cancel_active(Model& model)
+{
+    std::optional<OperationRef> operation;
+    MessageId assistant_id{};
+    bool active = false;
+
+    std::visit(
+        [&](const auto& phase) {
+            using Phase = std::decay_t<decltype(phase)>;
+            if constexpr (std::is_same_v<Phase, Streaming>) {
+                active = true;
+                operation = phase.ref;
+                assistant_id = phase.target_message_id;
+            } else if constexpr (std::is_same_v<Phase, AwaitingPermission>) {
+                active = true;
+                assistant_id = phase.call.assistant_message_id;
+            } else if constexpr (std::is_same_v<Phase, ExecutingTool>) {
+                active = true;
+                operation = phase.call;
+                assistant_id = phase.call.assistant_message_id;
+            } else if constexpr (std::is_same_v<Phase, Compacting>) {
+                active = true;
+                operation = phase.plan.compaction_id;
+            }
+        },
+        model.phase);
+
+    if (!active) {
+        return NoCommand{};
+    }
+
+    if (const auto* compacting = std::get_if<Compacting>(&model.phase);
+        compacting != nullptr) {
+        Cmd next = finish_compaction_failure(
+            model,
+            *compacting,
+            ContextBlockDetail::CompactionFailed);
+        if (std::holds_alternative<NoCommand>(next) && operation) {
+            return CancelOperation{.operation = *operation};
+        }
+        return next;
+    }
+
+    if (const auto* streaming = std::get_if<Streaming>(&model.phase);
+        streaming != nullptr && !streaming->usage_accepted) {
+        model.session.usage.mark_request_unavailable(streaming->ref, streaming->projection_receipt.fingerprint);
+    }
+
+    if (Message* assistant = message_for(model, assistant_id)) {
+        assistant->error = "cancelled";
+        constexpr std::string_view cancelled_output =
+            "Tool execution was cancelled before a result was available.";
+        for (ToolCall& call : assistant->tool_calls) {
+            if (call.is_pending()) {
+                call.status = ToolCall::Cancelled{
+                    .output = std::string{cancelled_output},
+                };
+            }
+        }
+    }
+    model.phase = Idle{};
+    if (!model.session.queued_messages.empty()) {
+        return drive(model);
+    }
+    if (operation) {
+        return CancelOperation{.operation = *operation};
+    }
+    return NoCommand{};
+}
+
+Cmd apply(Model& model, const CancelActive&)
+{
+    return cancel_active(model);
+}
+
+Cmd apply(Model& model, const ResumeQueue&)
+{
+    if (std::holds_alternative<Blocked>(model.phase)) {
+        model.phase = Idle{};
+    }
+    return drive(model);
+}
+
+Cmd apply(Model& model, const ClearQueue&)
+{
+    if (model.session.queued_messages.empty()) {
+        return NoCommand{};
+    }
+
+    model.session.queued_messages.clear();
+
+    // A queued-turn preparation owns no background provider operation. Moving
+    // away from its identity is enough to make the already-posted prepared
+    // event stale when the owner thread next drains the inbox.
+    if (const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
+        preparing != nullptr
+        && (preparing->purpose == RequestPurpose::QueuedTurn
+            || preparing->purpose == RequestPurpose::RetryCurrent)) {
+        model.phase = Idle{};
+        return NoCommand{};
+    }
+
+    // Compaction is private work performed solely for the queued head. Once
+    // that head is dropped, invalidate the operation without committing its
+    // pending summary or disturbing the last accepted compaction record.
+    if (const auto* compacting = std::get_if<Compacting>(&model.phase);
+        compacting != nullptr) {
+        const OperationRef operation = compacting->plan.compaction_id;
+        model.phase = Idle{};
+        return CancelOperation{.operation = operation};
+    }
+
+    if (const auto* blocked = std::get_if<Blocked>(&model.phase);
+        blocked != nullptr && blocked->reason == BlockReason::ContextLimit) {
+        model.phase = Idle{};
+    }
+    return NoCommand{};
+}
+
+}  // namespace
+
+Request canonical_request(const Thread& thread)
+{
+    return project_request_with_compaction(Request{
+        .messages = thread.messages,
+    }, thread);
+}
+
+Step update(Model model, Msg msg)
+{
+    Cmd cmd = std::visit(
+        [&model](const auto& event) -> Cmd {
+            return apply(model, event);
+        },
+        msg);
+    return Step{
+        .model = std::move(model),
+        .cmd = std::move(cmd),
+    };
+}
+
+}  // namespace my_agent

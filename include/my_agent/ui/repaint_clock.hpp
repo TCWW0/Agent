@@ -16,20 +16,33 @@ public:
 
     explicit RepaintClock(int frames_per_second);
 
-    // 请求一次重绘。返回是否现在就画。窗口内被压掉时会记住这次请求，
-    // 由 time_until_next_paint 报出补画的时机 —— 合并是延迟而不是丢弃。
+    // 请求一次立即重绘。请求只负责登记一个 deadline；should_paint 才消费它。
+    // 调用方必须把同一帧的 now 注入进来，这样动画宿主和领域事件共享一个调度器。
+    void request_frame(Clock::time_point now) noexcept;
+
+    // 请求下一次可见变化至少在 delay 后发生。多个请求合并成最早 deadline，
+    // 但真实绘制仍不得早于上一帧之后的 frame_budget_。
+    void request_frame_after(
+        Clock::time_point now,
+        std::chrono::milliseconds delay
+    ) noexcept;
+
+    // 消费一个已经到期的请求并返回是否现在就画。尚未到 deadline 时返回 false，
+    // 不会丢失 pending；无请求时也返回 false。
     [[nodiscard]]
-    bool should_paint(Clock::time_point now);
+    bool should_paint(Clock::time_point now) noexcept;
 
     // poll 的超时。有待补的更新时返回到下个窗口边界的剩余时间；无事可做时返回
     // -1（无限等），这是空闲时占 0% CPU 与占满一核的分界。
     [[nodiscard]]
-    std::chrono::milliseconds time_until_next_paint(Clock::time_point now) const;
+    std::chrono::milliseconds time_until_next_paint(
+        Clock::time_point now
+    ) const noexcept;
 
 private:
     std::chrono::milliseconds frame_budget_;
     std::optional<Clock::time_point> last_paint_;
-    bool pending_{false};  // 窗口内被压掉、还没补上的更新
+    std::optional<Clock::time_point> next_deadline_;
 };
 
 }  // namespace my_agent::ui

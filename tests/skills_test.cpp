@@ -1,5 +1,4 @@
 #include "my_agent/tool/skills.hpp"
-#include "my_agent/tool/tool.hpp"
 #include "../src/tool/read.hpp"
 #include "../src/tool/skill_tools.hpp"
 
@@ -8,7 +7,6 @@
 #include <fstream>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,12 +21,12 @@ namespace {
 namespace fs = std::filesystem;
 namespace skills = my_agent::tool::skills;
 
-// 每个测试一个独立临时目录，两个 root 模拟 project / user。
+// 每个测试一个独立目录，放在 /tmp 默认读权限之外；两个 root 模拟 project / user。
 class SkillEngineTest : public ::testing::Test {
 protected:
     void SetUp() override
     {
-        root_ = fs::temp_directory_path()
+        root_ = fs::current_path()
             / ("my_agent_skills_test_" + std::to_string(::getpid()) + "_"
                + ::testing::UnitTest::GetInstance()
                      ->current_test_info()
@@ -371,7 +369,7 @@ TEST_F(SkillEngineTest, ExposesSkillDirectoriesSoTheReadToolCanAllowThem)
 // 有 workspace 硬边界。允许列表把边界从「workspace」放宽到「workspace ∪ skill
 // 目录」—— **只放宽读**。这样正文引用的脚本读得到，同时工作区之外的任意文件
 // 仍然读不到。
-// Red 原因：make_read_tool 目前只接一个 workspace_root，没有允许列表参数。
+// 直接工厂的显式允许根与会话中的动态允许根都只影响 read。
 TEST_F(SkillEngineTest, ReadToolAllowsSkillDirectoriesWhileStillRefusingElsewhere)
 {
     write_skill(project_root(), "pdf", "---\nname: pdf\ndescription: PDFs\n---\nbody\n");
@@ -383,21 +381,21 @@ TEST_F(SkillEngineTest, ReadToolAllowsSkillDirectoriesWhileStillRefusingElsewher
     const fs::path workspace = root_ / "workspace";
     fs::create_directories(workspace);
 
-    const my_agent::tool::ToolDef read = my_agent::tool::detail::make_read_tool(
+    const my_agent::tool::RegisteredTool read = my_agent::tool::detail::make_read_tool(
         workspace,
         skills::SkillEngine{roots()}.directories()
     );
 
-    const my_agent::tool::ExecResult allowed = read.execute(nlohmann::json{
+    const my_agent::tool::ExecResult allowed = read.handler(nlohmann::json{
         {"path", (project_root() / "pdf" / "scripts" / "extract.sh").string()},
-    });
+    }, my_agent::tool::ToolExecutionContext{});
     ASSERT_TRUE(allowed.has_value()) << allowed.error().render();
     EXPECT_EQ("SCRIPT BODY\n", allowed->text);
 
     // 边界仍然在：不在允许列表里、也不在工作区里的文件照旧被拒。
-    const my_agent::tool::ExecResult refused = read.execute(nlohmann::json{
+    const my_agent::tool::ExecResult refused = read.handler(nlohmann::json{
         {"path", (root_ / "outside" / "secret.txt").string()},
-    });
+    }, my_agent::tool::ToolExecutionContext{});
     ASSERT_FALSE(refused.has_value());
     EXPECT_EQ(
         my_agent::tool::ErrorKind::OutOfWorkspace,
@@ -405,31 +403,9 @@ TEST_F(SkillEngineTest, ReadToolAllowsSkillDirectoriesWhileStillRefusingElsewher
     );
 }
 
-namespace {
-
-// 按值返回：调用点常写成 find_tool(make_skill_tools(engine), "skill")，那个 vector
-// 是临时对象，返回引用会在整个表达式结束时悬垂。
-my_agent::tool::ToolDef find_tool(
-    const std::vector<my_agent::tool::ToolDef>& tools,
-    std::string_view name
-)
-{
-    const auto found = std::ranges::find_if(
-        tools,
-        [name](const my_agent::tool::ToolDef& tool) { return tool.name == name; }
-    );
-    if (found == tools.end()) {
-        throw std::runtime_error{"tool not found: " + std::string{name}};
-    }
-    return *found;
-}
-
-}  // namespace
-
 // 场景：模型调 skill 工具加载一份 skill。
 // 领域语义：这是 SkillEngine 接进 Agent 的那一层 —— 引擎本身不知道工具的存在，
 // 工具层负责参数校验和把结果渲染成模型能直接照做的文本。
-// Red 原因：仓库尚无 skill_tools.cpp 的实现，make_skill_tools 返回空。
 TEST_F(SkillEngineTest, SkillToolReturnsTheActivatedBody)
 {
     write_skill(
@@ -439,12 +415,12 @@ TEST_F(SkillEngineTest, SkillToolReturnsTheActivatedBody)
     );
 
     auto engine = std::make_shared<skills::SkillEngine>(roots());
-    const my_agent::tool::ToolDef skill = find_tool(
-        my_agent::tool::detail::make_skill_tools(engine), "skill"
-    );
+    const my_agent::tool::RegisteredTool skill =
+        my_agent::tool::detail::make_skill_tool(engine);
 
     const my_agent::tool::ExecResult result =
-        skill.execute(nlohmann::json{{"name", "pdf"}});
+        skill.handler(nlohmann::json{{"name", "pdf"}},
+                      my_agent::tool::ToolExecutionContext{});
 
     ASSERT_TRUE(result.has_value()) << result.error().render();
     EXPECT_NE(std::string::npos, result->text.find("Run pdftotext first."));
@@ -460,9 +436,9 @@ TEST_F(SkillEngineTest, SkillToolListsAvailableNamesWhenTheRequestedOneIsUnknown
     write_skill(user_root(), "excel", "---\nname: excel\ndescription: Sheets\n---\nbody\n");
 
     auto engine = std::make_shared<skills::SkillEngine>(roots());
-    const my_agent::tool::ExecResult result = find_tool(
-        my_agent::tool::detail::make_skill_tools(engine), "skill"
-    ).execute(nlohmann::json{{"name", "nope"}});
+    const my_agent::tool::ExecResult result =
+        my_agent::tool::detail::make_skill_tool(engine).handler(
+            nlohmann::json{{"name", "nope"}}, my_agent::tool::ToolExecutionContext{});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(my_agent::tool::ErrorKind::NotFound, result.error().kind);
@@ -476,9 +452,9 @@ TEST_F(SkillEngineTest, SkillToolListsAvailableNamesWhenTheRequestedOneIsUnknown
 TEST_F(SkillEngineTest, SkillToolRequiresAName)
 {
     auto engine = std::make_shared<skills::SkillEngine>(roots());
-    const my_agent::tool::ExecResult result = find_tool(
-        my_agent::tool::detail::make_skill_tools(engine), "skill"
-    ).execute(nlohmann::json::object());
+    const my_agent::tool::ExecResult result =
+        my_agent::tool::detail::make_skill_tool(engine).handler(
+            nlohmann::json::object(), my_agent::tool::ToolExecutionContext{});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, result.error().kind);
@@ -491,20 +467,11 @@ TEST_F(SkillEngineTest, SkillToolRequiresAName)
 TEST_F(SkillEngineTest, SkillToolDeclaresReadFsBecauseActivationOnlyReadsFiles)
 {
     auto engine = std::make_shared<skills::SkillEngine>(roots());
-    const my_agent::tool::ToolDef skill = find_tool(
-        my_agent::tool::detail::make_skill_tools(engine), "skill"
-    );
+    const my_agent::tool::RegisteredTool skill =
+        my_agent::tool::detail::make_skill_tool(engine);
 
-    EXPECT_TRUE(skill.effects.has(my_agent::tool::Effect::ReadFs));
-    EXPECT_FALSE(skill.effects.has(my_agent::tool::Effect::WriteFs));
-}
-
-// 场景：从全局 registry 里找 skill 工具。
-// 领域语义：工具只有进了 registry 才会出现在发给模型的 tools 表里 —— 否则模型
-// 根本不知道它可以 activate 一份 skill。
-TEST(SkillRegistryTest, RegistersTheSkillToolInTheGlobalRegistry)
-{
-    EXPECT_NE(nullptr, my_agent::tool::find("skill"));
+    EXPECT_TRUE(skill.descriptor.effects.has(my_agent::tool::Effect::ReadFs));
+    EXPECT_FALSE(skill.descriptor.effects.has(my_agent::tool::Effect::WriteFs));
 }
 
 }  // namespace

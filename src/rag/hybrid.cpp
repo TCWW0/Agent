@@ -1,16 +1,46 @@
 // 切片 #41（issue #41）混合检索 —— cosine + RRF 名次融合 + hybrid 入口。
 // 本文件先是可编译空桩（Red 阶段「编译过、断言挂」），Green 由用户按
 // Red 测试亲手实现。教材对照：agentty/src/rag/bm25.cpp 的
-// cosine / reciprocal_rank_fusion、corpus.cpp 的 Corpus::search
+// cosine / reciprocal_rank_fusion、corpus.cpp 的 Corpus::retrieve
 // （「retrieve wide, fuse, return narrow」，候选池 max(k*8, 32)）。
 #include "my_agent/rag/rag.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <unordered_map>
 #include <utility>
 
 namespace my_agent::rag {
+
+namespace {
+
+CandidateSet make_bm25_candidates(std::vector<std::pair<std::uint32_t,double>> hits,
+                                  std::size_t k) {
+    if (hits.size() > k){
+        hits.resize(k);
+    }
+
+    CandidateSet result;
+    result.mode = SearchMode::Bm25Only;
+    result.candidates.reserve(hits.size());
+
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        const auto& [chunk_id, score] = hits[i];
+
+        Candidate candidate;
+        candidate.chunk_id = chunk_id;
+        candidate.final_score = score;
+        candidate.sparse = RankedScore{
+            .score = score,
+            .rank = i + 1,
+        };
+
+        result.candidates.push_back(std::move(candidate));
+    }
+    return result;
+}
+}
 
 double cosine_sim(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.empty() || a.size() != b.size()) return 0.0;
@@ -53,47 +83,110 @@ rrf_fuse(const std::vector<std::vector<std::uint32_t>>& ranked_lists, double k, 
     return out;
 }
 
-SearchResult
-hybrid_search(const Bm25Index& bm25, const DenseIndex& dense,
-              std::string_view query, const EmbedBackend& backend,
-              const EmbedConfig& cfg, std::size_t k) {
-    if (dense.vecs.empty() || cfg.model.empty())
-        return {bm25_search(bm25, query, k), SearchMode::Bm25Only};
+CandidateSet
+retrieve_candidates(const Bm25Index& bm25, const DenseIndex& dense,
+                    std::string_view query, const EmbedBackend& backend,
+                    const EmbedConfig& cfg, std::size_t k){
+    if (dense.vecs.empty() || cfg.model.empty()) {
+        return make_bm25_candidates(bm25_search(bm25,query,k), k);
+    }
 
-    auto qv = backend(cfg, {std::string{query}}, EmbedRole::Query);
-    if (!qv || qv->size() != 1)
-        return {bm25_search(bm25, query, k), SearchMode::Bm25Only};
-    const std::vector<float>& qvec = (*qv)[0];
+    auto query_vectors = backend(cfg, {std::string{query}}, EmbedRole::Query);
 
+    if (!query_vectors || query_vectors->size() != 1){
+        return make_bm25_candidates(bm25_search(bm25,query,k), k);
+    }
+
+    const std::vector<float>& query_vector = (*query_vectors)[0];
     const std::size_t pool = std::max<std::size_t>(k * 8, 32);
 
-    const auto bm25_hits = bm25_search(bm25, query, pool);
+    auto sparse_hits = bm25_search(bm25, query, pool);
 
-    std::vector<std::pair<std::uint32_t, double>> dense_scored;
-    dense_scored.reserve(dense.vecs.size());
-    for (std::uint32_t id = 0; id < dense.vecs.size(); ++id) {
-        const double s = cosine_sim(dense.vecs[id], qvec);
-        if (s > 0.0) dense_scored.push_back({id, s});
-    }
-    std::sort(dense_scored.begin(), dense_scored.end(),
-              [](const auto& a, const auto& b) {
-                  if (a.second != b.second) return a.second > b.second;
-                  return a.first < b.first;     // 同分 → id 升序，全链路同款
-              });
-    if (dense_scored.size() > pool) dense_scored.resize(pool);
+    std::vector<std::pair<std::uint32_t, double>> dense_hits;
+    dense_hits.reserve(dense.vecs.size());
 
-    // 语义名次表为空（全库零相似，例如换模型后维度对不上）→ BM25 单路，
-    // 返回原始 BM25 分而非 RRF 分 —— 降级要恒等，不要「差不多」
-    if (dense_scored.empty()) {
-        auto hits = bm25_hits;
-        if (hits.size() > k) hits.resize(k);
-        return {std::move(hits), SearchMode::Bm25Only};
+    for (std::size_t i = 0;i < dense.vecs.size(); ++i) {
+        const double score = cosine_sim(dense.vecs[i], query_vector);
+
+        if (score > 0.0) {
+            dense_hits.emplace_back(static_cast<std::uint32_t>(i),score);
+        }
     }
 
-    std::vector<std::vector<std::uint32_t>> lists;
-    lists.push_back(ranked_ids(bm25_hits));
-    lists.push_back(ranked_ids(dense_scored));
-    return {rrf_fuse(lists, kRrfK, k), SearchMode::Hybrid};
+    std::sort(dense_hits.begin(), dense_hits.end(),
+            [](const auto& lhs, const auto& rhs) {
+                if (lhs.second != rhs.second) {
+                    return lhs.second > rhs.second;
+                }
+                return lhs.first < rhs.first;
+            }
+    );
+
+    if (dense_hits.size() > pool) {
+        dense_hits.resize(pool);
+    }
+
+    if (dense_hits.empty()) {
+        return make_bm25_candidates(std::move(sparse_hits), k);
+    }
+
+    std::vector<std::vector<std::uint32_t>> ranked_lists;
+    ranked_lists.reserve(2);
+    ranked_lists.push_back(ranked_ids(sparse_hits));
+    ranked_lists.push_back(ranked_ids(dense_hits));
+
+    const auto fused_hits = rrf_fuse(ranked_lists, kRrfK, k);
+
+    std::unordered_map<std::uint32_t, RankedScore> sparse_evidence;
+    std::unordered_map<std::uint32_t, RankedScore> dense_evidence;
+
+    sparse_evidence.reserve(sparse_hits.size());
+    dense_evidence.reserve(dense_hits.size());
+
+    for (std::size_t i = 0; i < sparse_hits.size(); ++i) {
+        const auto& [chunk_id, score] = sparse_hits[i];
+
+        sparse_evidence.emplace(
+            chunk_id,
+            RankedScore{
+                .score = score,
+                .rank = i + 1,
+            }
+        );
+    }
+
+    for (std::size_t i = 0; i < dense_hits.size(); ++i) {
+        const auto& [chunk_id, score] = dense_hits[i];
+
+        dense_evidence.emplace(
+            chunk_id,
+            RankedScore{
+                .score = score,
+                .rank = i + 1,
+            }
+        );
+    }
+
+    CandidateSet result;
+    result.mode = SearchMode::Hybrid;
+    result.candidates.reserve(fused_hits.size());
+
+    for (const auto& [chunk_id, final_score] : fused_hits) {
+        Candidate candidate;
+        candidate.chunk_id = chunk_id;
+        candidate.final_score = final_score;
+
+        if (const auto it = sparse_evidence.find(chunk_id); it != sparse_evidence.end()) {
+            candidate.sparse = it->second;
+        }
+
+        if (const auto it = dense_evidence.find(chunk_id); it != dense_evidence.end()) {
+            candidate.dense = it->second;
+        }
+
+        result.candidates.push_back(std::move(candidate));
+    }
+    return result;
 }
 
 } // namespace my_agent::rag

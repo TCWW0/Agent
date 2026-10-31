@@ -1,4 +1,5 @@
 #include "my_agent/ui/input_editor.hpp"
+#include "my_agent/ui/composer_paste.hpp"
 
 #include <gtest/gtest.h>
 
@@ -80,6 +81,26 @@ TEST(InputEditorTest, BackspaceAtTheStartAndEndAreNoOps)
         Key{.kind = Key::Kind::Right}
     );
     EXPECT_EQ("你好", state.buffer);
+    EXPECT_EQ(6u, state.cursor);
+}
+
+TEST(InputEditorTest, TreatsPastePlaceholderAsOneEditableUnit)
+{
+    const std::string placeholder =
+        my_agent::ui::make_paste_placeholder(0);
+    const std::string buffer = "before" + placeholder + "after";
+
+    auto state = edit_input(
+        buffer, 6,
+        Key{.kind = Key::Kind::Right}
+    );
+    EXPECT_EQ(6u + placeholder.size(), state.cursor);
+
+    state = edit_input(
+        state.buffer, state.cursor,
+        Key{.kind = Key::Kind::Backspace}
+    );
+    EXPECT_EQ("beforeafter", state.buffer);
     EXPECT_EQ(6u, state.cursor);
 }
 

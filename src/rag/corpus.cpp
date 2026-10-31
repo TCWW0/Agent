@@ -456,11 +456,34 @@ const std::vector<Chunk>& Corpus::chunks() const {return chunks_;}
 const Bm25Index& Corpus::bm25() const { return bm25_; }
 const DenseIndex& Corpus::dense() const { return dense_; }
 
-SearchResult
-Corpus::search(std::string_view query, const EmbedBackend& backend,
-               const EmbedConfig& cfg, std::size_t k) const {
-    if (chunks_.empty()) return {};
-    return hybrid_search(bm25_, dense_, query, backend, cfg, k);
+RetrievalResult
+Corpus::retrieve(std::string_view query, const EmbedBackend& backend,
+                 const EmbedConfig& cfg, std::size_t k) const {
+    const CandidateSet candidates =
+        retrieve_candidates(bm25_, dense_, query, backend, cfg, k);
+
+    RetrievalResult result;
+    result.mode = candidates.mode;
+    result.corpus_chunk_count = chunks_.size();
+    result.passages.reserve(candidates.candidates.size());
+
+    for (const auto& [chunk_id, score, sparse, dense] : candidates.candidates) {
+        const Chunk& chunk = chunks_[chunk_id];
+
+        result.passages.push_back(RankedPassage{
+            .provenance = Provenance{
+                .path = chunk.path,
+                .line_start = chunk.line_start,
+                .line_end = chunk.line_end,
+                .context = chunk.context,
+            },
+            .text = chunk.text,
+            .score = score,
+            .sparse = sparse,
+            .dense = dense,
+        });
+    }
+    return result;
 }
 
 } // namespace my_agent::rag

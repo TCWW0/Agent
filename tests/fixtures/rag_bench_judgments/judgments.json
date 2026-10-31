@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {
+      "q": "database migrations before starting service",
+      "gold": ["deployment.md"]
+    }
+  ]
+}

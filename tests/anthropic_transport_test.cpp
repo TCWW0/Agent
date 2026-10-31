@@ -11,12 +11,12 @@
 
 namespace {
 
-std::vector<my_agent::Msg> decode(const std::vector<std::string>& chunks)
+std::vector<my_agent::ProviderEvent> decode(const std::vector<std::string>& chunks)
 {
     my_agent::provider::anthropic::StreamDecoder decoder;
-    std::vector<my_agent::Msg> messages;
+    std::vector<my_agent::ProviderEvent> messages;
 
-    my_agent::EventSink sink = [&messages](my_agent::Msg msg) {
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
         messages.push_back(std::move(msg));
     };
 
@@ -38,7 +38,7 @@ std::vector<my_agent::Msg> decode(const std::vector<std::string>& chunks)
 // Red 原因：仓库尚无 anthropic.cpp，StreamDecoder::feed 无定义。
 TEST(AnthropicStreamDecoderTest, EmitsOneCompleteToolCallAfterAccumulatingPartialJson)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "event: content_block_start\n"
         "data: {\"type\":\"content_block_start\",\"index\":0,"
         "\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n\n",
@@ -75,7 +75,7 @@ TEST(AnthropicStreamDecoderTest, EmitsOneCompleteToolCallAfterAccumulatingPartia
 // StreamFinished，宿主的「每次 stream 恰好一个终态事件」保证靠它满足。
 TEST(AnthropicStreamDecoderTest, StreamsTextImmediatelyAndFinishesOnMessageStop)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "event: message_start\n"
         "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n",
 
@@ -130,12 +130,108 @@ TEST(AnthropicStreamDecoderTest, StreamsTextImmediatelyAndFinishesOnMessageStop)
     EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(3)));
 }
 
+TEST(AnthropicStreamDecoderTest, PublishesCombinedUsageBeforeMessageStopTerminal)
+{
+    const std::vector<my_agent::ProviderEvent> messages = decode({
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{"
+        "\"usage\":{\"input_tokens\":100,"
+        "\"cache_read_input_tokens\":7,"
+        "\"cache_creation_input_tokens\":3}}}\n\n",
+
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{"
+        "\"stop_reason\":\"end_turn\"},"
+        "\"usage\":{\"output_tokens\":36}}\n\n",
+
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n",
+    });
+
+    ASSERT_EQ(std::size_t{2}, messages.size());
+    const auto* usage = std::get_if<my_agent::RequestUsage>(&messages.at(0));
+    ASSERT_NE(nullptr, usage);
+    EXPECT_EQ(110u, usage->input_tokens);
+    ASSERT_TRUE(usage->cached_input_tokens.has_value());
+    EXPECT_EQ(10u, *usage->cached_input_tokens);
+    ASSERT_TRUE(usage->cache_read_input_tokens.has_value());
+    EXPECT_EQ(7u, *usage->cache_read_input_tokens);
+    ASSERT_TRUE(usage->cache_creation_input_tokens.has_value());
+    EXPECT_EQ(3u, *usage->cache_creation_input_tokens);
+    EXPECT_EQ(36u, usage->output_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Exact, usage->quality);
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(1)));
+}
+
+TEST(AnthropicStreamDecoderTest, CompletesAtHttpEofWhenMessageStopIsMissing)
+{
+    my_agent::provider::anthropic::StreamDecoder decoder;
+    std::vector<my_agent::ProviderEvent> messages;
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
+        messages.push_back(std::move(msg));
+    };
+
+    decoder.feed(
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{"
+        "\"usage\":{\"input_tokens\":12}}}\n\n",
+        sink);
+    decoder.feed(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"usage\":{"
+        "\"output_tokens\":3}}\n\n",
+        sink);
+    decoder.finish(sink);
+
+    ASSERT_EQ(std::size_t{2}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::RequestUsage>(messages.at(0)));
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(1)));
+}
+
+TEST(AnthropicStreamDecoderTest, EmitsOnlyOneTerminalForDuplicateMessageStop)
+{
+    my_agent::provider::anthropic::StreamDecoder decoder;
+    std::vector<my_agent::ProviderEvent> messages;
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
+        messages.push_back(std::move(msg));
+    };
+
+    decoder.feed(
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n"
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n",
+        sink);
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.front()));
+}
+
+TEST(AnthropicStreamDecoderTest, IgnoresMalformedFrameAndStillFinishes)
+{
+    my_agent::provider::anthropic::StreamDecoder decoder;
+    std::vector<my_agent::ProviderEvent> messages;
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
+        messages.push_back(std::move(msg));
+    };
+
+    decoder.feed(
+        "event: message_start\n"
+        "data: {not-json}\n\n"
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n\n",
+        sink);
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.front()));
+}
+
 // 场景：Anthropic 在流中途发 error 事件（超载、上下文超限等）。
 // 领域语义：错误也是终态事件之一。传输层把它折成 StreamError，宿主据此结束回合
 // 并让错误在 Model 里可见，而不是让 owner 永久等一个不会来的 message_stop。
 TEST(AnthropicStreamDecoderTest, ConvertsErrorEventIntoStreamError)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "event: error\n"
         "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\","
         "\"message\":\"Overloaded\"}}\n\n",
@@ -147,12 +243,33 @@ TEST(AnthropicStreamDecoderTest, ConvertsErrorEventIntoStreamError)
     EXPECT_EQ("Overloaded", error->message);
 }
 
+TEST(AnthropicStreamDecoderTest, NormalizesPromptTooLongAsContextLimit)
+{
+    const std::vector<my_agent::ProviderEvent> messages = decode({
+        "event: error\n"
+        "data: {\"type\":\"error\",\"error\":{"
+        "\"type\":\"invalid_request_error\","
+        "\"message\":\"prompt is too long for this model\"}}\n\n",
+    });
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    const auto* error = std::get_if<my_agent::StreamError>(&messages.front());
+    ASSERT_NE(nullptr, error);
+    ASSERT_TRUE(error->provider_error.has_value());
+    EXPECT_EQ(
+        my_agent::ProviderErrorKind::ContextLimit,
+        error->provider_error->kind
+    );
+    EXPECT_EQ("invalid_request_error", error->provider_error->type);
+    EXPECT_EQ("prompt is too long for this model", error->message);
+}
+
 // 场景：一个不带任何参数的工具，partial_json 一片都不会到达。
 // 领域语义：空累积串不等于「解析失败」，而等于空参数对象。如果按解析失败处理，
 // 无参工具就永远调不起来。
 TEST(AnthropicStreamDecoderTest, TreatsAnEmptyArgumentAccumulatorAsAnEmptyObject)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "event: content_block_start\n"
         "data: {\"type\":\"content_block_start\",\"index\":0,"
         "\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_3\",\"name\":\"now\"}}\n\n",
@@ -174,7 +291,7 @@ TEST(AnthropicStreamDecoderTest, TreatsAnEmptyArgumentAccumulatorAsAnEmptyObject
 // 投出一个 id/name 全空的假工具调用 —— 这是累积式解码器最容易踩的坑。
 TEST(AnthropicStreamDecoderTest, DoesNotSynthesizeAToolCallWhenATextBlockStops)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "event: content_block_start\n"
         "data: {\"type\":\"content_block_start\",\"index\":0,"
         "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -229,6 +346,28 @@ TEST(AnthropicRequestTest, PutsSystemPromptAtTheTopLevelAndUsesInputSchemaForToo
     ASSERT_EQ(std::size_t{1}, body.at("tools").size());
     EXPECT_EQ("read", body.at("tools").at(0).at("name"));
     EXPECT_EQ("object", body.at("tools").at(0).at("input_schema").at("type"));
+}
+
+TEST(AnthropicRequestTest, SendsConfiguredOutputBudgetAsMaxTokens)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 777;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::anthropic::build_request_body("claude", request));
+
+    EXPECT_EQ(777u, body.at("max_tokens").get<std::uint64_t>());
+}
+
+TEST(AnthropicRequestTest, SendsNormalOutputCapAsMaxTokens)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 2048;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::anthropic::build_request_body("claude", request));
+
+    EXPECT_EQ(2048u, body.at("max_tokens").get<std::uint64_t>());
 }
 
 // 场景：历史里有一条带已完成工具调用的 assistant 消息。

@@ -2,9 +2,11 @@
 #include "my_agent/prompt/system_prompt.hpp"
 #include "my_agent/provider/ollama.hpp"
 #include "my_agent/runtime/async_host.hpp"
-#include "my_agent/tool/memory_store.hpp"
-#include "my_agent/tool/skills.hpp"
-#include "my_agent/ui/terminal.hpp"
+#include "my_agent/runtime/permission_projection.hpp"
+#include "my_agent/tool/session_services.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
+#include "my_agent/ui/painter.hpp"
+#include "my_agent/ui/terminal_session.hpp"
 #include "my_agent/ui/ui_loop.hpp"
 
 #include <cstdlib>
@@ -33,11 +35,11 @@ class Printer {
 public:
     void render(const my_agent::Model& model)
     {
-        if (model.thread.messages.empty()) {
+        if (model.domain.thread.messages.empty()) {
             return;
         }
 
-        const my_agent::Message& latest = model.thread.messages.back();
+        const my_agent::Message& latest = model.domain.thread.messages.back();
         if (latest.role != my_agent::Role::Assistant) {
             return;
         }
@@ -56,18 +58,11 @@ private:
 };
 
 // 权限审批：停在 AwaitingPermission 时问一次 y/n。这是 M4 权限闭环的终端出口。
-bool ask_approval(const my_agent::PendingPermission& pending, const my_agent::Model& model)
+bool ask_approval(const my_agent::ToolActivityProjection& activity)
 {
-    std::string tool_name{"(unknown)"};
-    for (const my_agent::Message& message : model.thread.messages) {
-        for (const my_agent::ToolCall& call : message.tool_calls) {
-            if (call.id == pending.id) {
-                tool_name = call.name;
-            }
-        }
-    }
-
-    std::cout << "\n[permission] allow tool '" << tool_name << "'? [y/N] "
+    std::cout << "\n[permission] allow tool '" << activity.tool_name
+              << "'? effect=" << activity.effects
+              << " args: " << activity.arguments << " [y/N] "
               << std::flush;
 
     std::string answer;
@@ -89,39 +84,13 @@ my_agent::Profile parse_profile(std::string_view name)
     return my_agent::Profile::Write;
 }
 
-// 两个 scope 的记录都注入，project 在后 —— 更贴近当前工作的事实离指令更近。
-// 渲染带上 id，模型才能在用户说「忘掉那条」时精确调 forget。
-std::vector<std::string> load_memories()
-{
-    namespace memory = my_agent::tool::memory;
-
-    const memory::MemoryStore store{memory::discover_roots()};
-
-    std::vector<std::string> lines;
-    for (const memory::Scope scope : {memory::Scope::User, memory::Scope::Project}) {
-        for (const memory::Record& record : store.load_all(scope)) {
-            lines.push_back(memory::render_for_prompt(record));
-        }
-    }
-    return lines;
-}
-
-// Tier1：只有名字和一句描述进提示。正文等模型调 skill 工具才加载，资源文件更是
-// 只列不读 —— 全部塞进提示，token 会随 skill 数量线性增长，而一个回合真正用得上
-// 的通常只有一份。
-std::string load_skills_catalog()
-{
-    namespace skills = my_agent::tool::skills;
-    return skills::SkillEngine{skills::discover_roots()}.catalog_block();
-}
-
 void report_errors(const my_agent::Model& model)
 {
-    if (model.thread.messages.empty()) {
+    if (model.domain.thread.messages.empty()) {
         return;
     }
 
-    const my_agent::Message& latest = model.thread.messages.back();
+    const my_agent::Message& latest = model.domain.thread.messages.back();
     if (latest.error) {
         std::cout << "\n[error] " << *latest.error << "\n";
     }
@@ -159,18 +128,27 @@ void run_line_repl(my_agent::AsyncHost& host_runtime)
                 break;
             }
 
-            if (!current.pending_permission) {
-                break;
+            const my_agent::ToolActivityProjection activity =
+                my_agent::tool_activity_projection(current);
+            if (activity.kind
+                != my_agent::ToolActivityProjection::Kind::AwaitingPermission) {
+                std::cout << "\n[permission] "
+                          << (activity.diagnostic.empty()
+                                  ? "permission state invalid"
+                                  : activity.diagnostic)
+                          << "; cancelling turn\n";
+                host_runtime.dispatch(my_agent::Msg{my_agent::CancelActive{}});
+                continue;
             }
-
-            const my_agent::PendingPermission pending = *current.pending_permission;
-            if (ask_approval(pending, current)) {
+            if (ask_approval(activity)) {
                 host_runtime.dispatch(my_agent::Msg{
-                    my_agent::PermissionApprove{.id = pending.id},
+                    my_agent::PermissionApprove{
+                        .call = activity.call},
                 });
             } else {
                 host_runtime.dispatch(my_agent::Msg{
-                    my_agent::PermissionReject{.id = pending.id},
+                    my_agent::PermissionReject{
+                        .call = activity.call},
                 });
             }
         }
@@ -194,23 +172,45 @@ int main()
     const auto stream_stats =
         std::make_shared<my_agent::provider::ollama::StreamStats>();
 
+    const my_agent::tool::SessionServices services{
+        my_agent::tool::discover_session_facts()
+    };
+
+    const auto tool_runtime = std::make_shared<const my_agent::tool::ToolRuntime>(
+        services.registrations());
+    
     my_agent::AsyncHost host_runtime{
         my_agent::provider::ollama::make_stream(
             host,
             port,
             model,
             std::make_shared<my_agent::http::HttpClient>(),
-            stream_stats
+            stream_stats,
+            context_limit
         ),
+        tool_runtime,
     };
+    host_runtime.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{
+        .policy = my_agent::RequestPolicy{my_agent::ContextManagementConfig{
+                                              .configured_limit = context_limit,
+                                          },
+            "ollama",
+            model}}});
 
-    // 每轮重新构建：memory 与 skill 目录会在会话过程中变化。remember 工具刚写下
-    // 的事实，下一轮就必须出现在提示里 —— 这正是 provider 是函数而不是字符串的理由。
-    host_runtime.set_system_prompt_provider([] {
-        my_agent::prompt::Context context = my_agent::prompt::capture_environment();
-        context.memories = load_memories();
-        context.skills_catalog = load_skills_catalog();
-        return my_agent::prompt::build(context);
+    // 每轮重新构建**提示**，但不再重建**服务**。
+    //
+    // 旧注释说「memory 与 skill 目录会在会话过程中变化，所以每轮重建」——
+    // 前提对（remember 刚写下的事实，下一轮必须出现在提示里），结论错。
+    // 答案之所以新鲜，是因为 MemoryStore::load_all() 每次读盘、
+    // SkillEngine::all() 每次重扫，不是因为环境发现了两次。
+    // 实例稳定，答案新鲜。
+    host_runtime.set_system_prompt_provider([&services] {
+        return my_agent::prompt::build(my_agent::prompt::Context{
+            .working_directory = services.workspace_root().string(),
+            .operating_system = my_agent::prompt::host_operating_system(),
+            .memories = services.memory_lines(),
+            .skills_catalog = services.skill_catalog(),
+        });
     });
 
     host_runtime.dispatch(my_agent::Msg{
@@ -221,7 +221,8 @@ int main()
         // 驱动的作用域必须比 run_ui 大一点：析构负责退出备用屏并还原 termios，
         // 而下面那句给行式回退路径的提示得等还原之后才打，否则它会连同备用屏一起
         // 被丢掉，用户看到的是一个没有任何说明的空白屏。
-        my_agent::ui::TerminalDriver terminal{STDIN_FILENO, STDOUT_FILENO};
+        my_agent::ui::TerminalSession terminal{STDIN_FILENO, STDOUT_FILENO};
+        my_agent::ui::Painter painter;
         // 崩溃时析构不会执行，而 raw mode 没还原意味着用户的 shell 从此不回显 ——
         // 只能敲 reset 才救得回来。所以这条路径不能依赖 RAII。放在真实入口而不是
         // 驱动构造函数里：挂信号是进程级副作用，测试要能构造驱动而不动它。
@@ -237,17 +238,23 @@ int main()
                 };
                 const auto snapshot = stream_stats->snapshot();
                 if (snapshot.available) {
-                    status.context_used = snapshot.prompt_eval_count;
                     status.tokens_per_second = snapshot.tokens_per_second;
+                    status.tokens_generated = snapshot.eval_count;
+                    status.telemetry_generation = snapshot.generation;
                     status.elapsed_seconds = snapshot.eval_duration_seconds;
                 }
                 return status;
             };
+        const my_agent::ui::UiConfig ui_config =
+            my_agent::ui::UiConfig::from_environment_value(
+                std::getenv("MY_AGENT_MOUSE_SCROLL_ROWS"));
 
         if (my_agent::ui::run_ui(
                 host_runtime,
                 terminal,
-                status_provider
+                painter,
+                status_provider,
+                ui_config
             )) {
             host_runtime.shutdown();
             return 0;

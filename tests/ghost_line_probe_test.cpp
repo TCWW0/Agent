@@ -15,13 +15,17 @@
 //
 // 探针自身的验证：断言用哨兵串 GH7ZQ（不可能预先存在），基线在敲键**之前**抓。
 
-#include "my_agent/ui/terminal.hpp"
+#include "my_agent/ui/painter.hpp"
+#include "my_agent/ui/terminal_session.hpp"
 #include "my_agent/ui/ui_loop.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 #include "virtual_terminal.hpp"
 
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <memory>
+#include <vector>
 #include <thread>
 
 #include <poll.h>
@@ -91,10 +95,14 @@ TEST(GhostLineProbeTest, PastingEmojiIntoTheInputLineDoesNotScrollTheAltScreen)
     }
 
     // 不需要 provider：输入行不进 Model，本条只测投影与帧字节。
-    my_agent::AsyncHost host{[](my_agent::Request, my_agent::EventSink) {}};
+    my_agent::AsyncHost host{
+        [](my_agent::Request, my_agent::ProviderEventSink) {},
+        std::make_shared<const my_agent::tool::ToolRuntime>(
+            std::vector<my_agent::tool::RegisteredTool>{})};
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     // 必须等驱动进 raw mode 才能敲键：tcsetattr 用 TCSAFLUSH，会丢弃此前排队的输入。

@@ -21,8 +21,14 @@ struct Context {
 [[nodiscard]]
 std::string build(const Context& context);
 
-// 采集当前进程的环境事实。这是 build() 之外唯一碰 IO 的部分。
+// 宿主操作系统。**进程级**事实：会话之间不会不同，所以留在 prompt，
+// 不进会话服务。判据就这一句 —— 会话之间会不会不同。
+//
+// working_directory 曾经也从这里采集（那时函数叫 capture_environment），
+// TS-003 把它还给了会话：它**会**随会话不同（cwd 是会话构造时定下的边界）。
+// 一个仍叫 capture_environment、却把 working_directory 留空的函数是误导，
+// 所以那个名字一并删掉。
 [[nodiscard]]
-Context capture_environment();
+std::string host_operating_system();
 
 }  // namespace my_agent::prompt

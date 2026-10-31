@@ -21,6 +21,7 @@ TEST(RepaintClockTest, PaintsImmediatelyOnTheFirstRequest)
 {
     RepaintClock clock{20};  // 每秒 20 帧 = 每 50ms 至多一帧
 
+    clock.request_frame(kStart);
     EXPECT_TRUE(clock.should_paint(kStart));
 }
 
@@ -32,9 +33,13 @@ TEST(RepaintClockTest, CoalescesRequestsWithinTheSameFrameWindow)
 {
     RepaintClock clock{20};
 
+    clock.request_frame(kStart);
     ASSERT_TRUE(clock.should_paint(kStart));
+    clock.request_frame(kStart + 10ms);
     EXPECT_FALSE(clock.should_paint(kStart + 10ms));
+    clock.request_frame(kStart + 30ms);
     EXPECT_FALSE(clock.should_paint(kStart + 30ms));
+    clock.request_frame(kStart + 49ms);
     EXPECT_FALSE(clock.should_paint(kStart + 49ms));
 }
 
@@ -46,8 +51,11 @@ TEST(RepaintClockTest, PaintsAgainOnceTheFrameWindowHasElapsed)
 {
     RepaintClock clock{20};
 
+    clock.request_frame(kStart);
     ASSERT_TRUE(clock.should_paint(kStart));
+    clock.request_frame(kStart + 10ms);
     ASSERT_FALSE(clock.should_paint(kStart + 10ms));
+    clock.request_frame(kStart + 50ms);
     EXPECT_TRUE(clock.should_paint(kStart + 50ms));
 }
 
@@ -60,7 +68,9 @@ TEST(RepaintClockTest, ReportsHowLongToWaitSoASuppressedPaintIsNotLost)
 {
     RepaintClock clock{20};
 
+    clock.request_frame(kStart);
     ASSERT_TRUE(clock.should_paint(kStart));
+    clock.request_frame(kStart + 20ms);
     ASSERT_FALSE(clock.should_paint(kStart + 20ms));
 
     EXPECT_EQ(30ms, clock.time_until_next_paint(kStart + 20ms));
@@ -74,9 +84,40 @@ TEST(RepaintClockTest, WaitsIndefinitelyWhenNothingIsPending)
 {
     RepaintClock clock{20};
 
+    clock.request_frame(kStart);
     ASSERT_TRUE(clock.should_paint(kStart));
 
     EXPECT_EQ(-1ms, clock.time_until_next_paint(kStart + 100ms));
+}
+
+TEST(RepaintClockTest, MergesImmediateAndDelayedRequestsIntoEarliestDeadline)
+{
+    RepaintClock clock{20};
+
+    clock.request_frame(kStart);
+    ASSERT_TRUE(clock.should_paint(kStart));
+
+    clock.request_frame_after(kStart, 100ms);
+    clock.request_frame_after(kStart + 1ms, 80ms);
+    EXPECT_EQ(81ms, clock.time_until_next_paint(kStart));
+
+    clock.request_frame(kStart + 10ms);
+    EXPECT_EQ(40ms, clock.time_until_next_paint(kStart + 10ms));
+    EXPECT_FALSE(clock.should_paint(kStart + 49ms));
+    EXPECT_TRUE(clock.should_paint(kStart + 50ms));
+}
+
+TEST(RepaintClockTest, AConsumedRequestMustBeRearmedByTheNextPaint)
+{
+    RepaintClock clock{20};
+
+    clock.request_frame(kStart);
+    ASSERT_TRUE(clock.should_paint(kStart));
+    EXPECT_EQ(-1ms, clock.time_until_next_paint(kStart));
+
+    clock.request_frame_after(kStart + 1ms, 5ms);
+    EXPECT_TRUE(clock.should_paint(kStart + 50ms));
+    EXPECT_EQ(-1ms, clock.time_until_next_paint(kStart + 50ms));
 }
 
 }  // namespace

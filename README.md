@@ -21,7 +21,7 @@
 
 This project exists to learn how a terminal coding agent actually works — by rebuilding one, not reading one. Every subsystem lands as a slice with its own red → green cycle, and the commits are the curriculum.
 
-- **The event loop is the point.** A hand-built Elm-style core — `(Model, Msg) → Model` on top of `AsyncHost`, a worker pool, and wake signals. [maya](https://github.com/1ay1/maya) is deliberately used **for rendering only**; its `run<Program>` loop is banned in this repo, precisely because owning the loop is what the project is for.
+- **The event loop is the point.** A hand-built Elm-style core — `(Model, Msg) → Step{Model, Cmd}` on top of `AsyncHost`, a worker pool, and wake signals. [maya](https://github.com/1ay1/maya) is deliberately used **for rendering only**; its `run<Program>` loop is banned in this repo, precisely because owning the loop is what the project is for.
 - **The terminal is treated as an adversary.** Raw mode is restored via RAII *and* a signal handler (RAII doesn't run under SIGSEGV); the driver tracks a `Synced`/`Divergent` coherence state so a resize or a partial write can never leave ghost cells on screen. Every claim is verified against a real pty plus a virtual terminal model, using official Unicode 16 width data.
 - **Local-first.** The model is a localhost Ollama server, retrieval runs fully offline (keyword-only when no embedding server is up), and memory/skills live in plain files under `.my_agent/` — Claude Code's `.claude/` directories are read as-is.
 - **One binary, zero runtime deps.** Everything — SSE parsing, BM25, RRF fusion, the TUI — is in-house C++/STL on top of three small pinned libraries.
@@ -78,7 +78,7 @@ Drop a `SKILL.md` under `.my_agent/skills/` or `.claude/skills/` — project roo
 <td width="50%">
 
 ### ⚡ Own event loop, no framework
-`AsyncHost` — `dispatch` / `run_until_quiescent` / `model()` — driving a `(Model, Msg) → Model` reducer. Tools execute on a worker pool and wake the loop through a pollable signal; repaints coalesce into frame windows. The rendering seam is exactly two calls: `FrameBuffer::render()` + `commit()`.
+`AsyncHost` — `dispatch` / `run_until_quiescent` / `model()` — driving a `(Model, Msg) → Step{Model, Cmd}` reducer. Tools execute on a worker pool and wake the loop through a pollable signal; repaints coalesce into frame windows. The rendering seam is exactly two calls: `FrameBuffer::render()` + `commit()`.
 
 ### 🛡️ Permission profiles
 Every tool declares an effect set (`ReadFs` · `WriteFs` · `Net` · `Exec`). `minimal` prompts on reads, `ask` prompts on writes, `write` allows the workspace; the `read` tool refuses paths outside your workspace, period.
@@ -145,6 +145,7 @@ probes where dense must rescue, cached per gold chunk):
 | `Enter` | Send (empty line is a no-op) | `y` / `n` | Approve / reject a pending tool |
 | `Backspace` | Delete a whole UTF-8 character | `←` `→` `Home` `End` | Move within the input |
 | `↑` / `↓` | Move across wrapped input lines | `^U` / `^C` | Clear the draft (never quits) |
+| `Ctrl-X` | Clear all queued prompts | `Ctrl-R` | Retry a blocked queue |
 | `Ctrl-D` | Quit — the only exit path | | |
 
 ## More
@@ -152,13 +153,16 @@ probes where dense must rescue, cached per gold chunk):
 <details>
 <summary><b>Architecture</b></summary>
 
+See [Runtime architecture](docs/RUNTIME-ARCHITECTURE.md) for the current state, identity, cancellation, configuration and usage contracts.
+See the [2026-10-09 milestone summary (Chinese)](docs/REFACTOR-MILESTONE-2026-10-09.md) for the refactor scope, repository status and recommended next steps.
+
 - **Update loop**: `AsyncHost` (dispatch / `run_until_quiescent` / `model`)
-  over a `(Model, Msg) → Model` reducer in `runtime/agent.cpp`. Streaming
+  over a `(Model, Msg) → Step{Model, Cmd}` reducer in `runtime/agent.cpp`. Streaming
   deltas, tool results, and permission responses all arrive as `Msg`s through
   one inbox; background work lands on a worker pool and pokes the loop through
   a pollable wake signal.
-- **View**: `Model → Element` (`ui/view.cpp`, `ui/screen.cpp`), rendered by
-  maya. The project uses exactly one maya seam — `FrameBuffer::render()` +
+- **View**: `Model + UiState → ScreenConfig` (`ui/screen.cpp`), rendered by
+  maya through `ui/painter.cpp`. The project uses one rendering seam — `FrameBuffer::render()` +
   `commit()` — and deliberately not `maya::run<App>`: the loop is the
   deliverable, not a detail to delegate.
 - **Terminal driver**: the only place that touches `termios` or writes bytes.
@@ -167,17 +171,16 @@ probes where dense must rescue, cached per gold chunk):
   don't run. Screen coherence is a `std::variant`: `Synced` (front buffer ==
   terminal pixels, diffable) or `Divergent` (size changed or a write failed —
   full re-serialization, row-by-row with trailing erases, in a single write).
-- **Transcripts**: markdown is scanned line-by-line with fence awareness, so a
-  half-streamed code block renders as live text instead of flickering.
-- **Headless**: a `headless_runner` drives the same loop without a terminal,
-  pausing at permission gates for an external answer.
+- **Transcripts**: the active screen projects messages into maya's
+  `Conversation` widget. Assistant text currently uses plain text slots;
+  in-flight activity is projected separately.
 
 </details>
 
 <details>
 <summary><b>Testing</b></summary>
 
-36 test binaries, 343 tests, all green. The suite goes beyond unit tests:
+The test suite goes beyond unit tests:
 
 - **Real ptys** — raw mode, resize, and byte-level output are verified on
   actual pseudo-terminals, not mocks.
@@ -204,12 +207,12 @@ src/
   provider/   anthropic · openai · ollama transports + SSE framing
   http/       HTTPS client (cpp-httplib, OpenSSL pinned on)
   prompt/     system prompt assembly (environment, memory, skills)
-  runtime/    agent loop · async host · worker pool · wake signals · headless runner
+  runtime/    agent loop · async host · worker pool · wake signals
   tool/       registry, effects & permission policy, read, memory, skills, search_docs
   rag/        corpus · chunker · BM25 · embeddings · RRF hybrid · bench
-  ui/         event loop, terminal driver, view/screen, markdown scanner,
-              input editor & layout, status bar, repaint clock, resize watch
-tests/        36 gtest binaries + virtual terminal + width oracle
+  ui/         event loop, terminal driver, semantic screen, input editor,
+              usage projection, repaint clock, resize watch
+tests/        gtest binaries + virtual terminal + width oracle
 ```
 
 Dependencies are pinned via FetchContent: googletest, nlohmann_json,

@@ -1,10 +1,14 @@
 #include "my_agent/provider/openai.hpp"
+#include "my_agent/provider/error.hpp"
 
 #include "my_agent/domain/conversation.hpp"
 #include "my_agent/runtime/msg.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -72,14 +76,65 @@ void append_message(nlohmann::json& messages, const Message& message)
 
 }  // namespace
 
-void StreamDecoder::feed(std::string_view chunk, const EventSink& sink)
+void StreamDecoder::feed(std::string_view chunk, const ProviderEventSink& sink)
 {
     assembler_.feed(chunk, [this, &sink](const sse::Event& event) {
         handle_event(event, sink);
     });
 }
 
-void StreamDecoder::flush_tool_calls(const EventSink& sink)
+void StreamDecoder::finish(const ProviderEventSink& sink)
+{
+    if (finished_) {
+        return;
+    }
+    flush_tool_calls(sink);
+    finished_ = true;
+    sink(ProviderEvent{StreamFinished{}});
+}
+
+bool StreamDecoder::terminal_emitted() const noexcept
+{
+    return finished_;
+}
+
+void StreamDecoder::emit_usage(
+    const nlohmann::json& usage,
+    const ProviderEventSink& sink)
+{
+    if (usage_emitted_ || !usage.is_object()) {
+        return;
+    }
+
+    const auto prompt_tokens = usage.find("prompt_tokens");
+    const auto completion_tokens = usage.find("completion_tokens");
+    if (prompt_tokens == usage.end()
+        || !prompt_tokens->is_number_unsigned()
+        || completion_tokens == usage.end()
+        || !completion_tokens->is_number_unsigned()) {
+        return;
+    }
+
+    std::optional<std::uint64_t> cached_input_tokens;
+    const auto details = usage.find("prompt_tokens_details");
+    if (details != usage.end() && details->is_object()) {
+        const auto cached = details->find("cached_tokens");
+        if (cached != details->end() && cached->is_number_unsigned()) {
+            cached_input_tokens = cached->get<std::uint64_t>();
+        }
+    }
+
+    sink(ProviderEvent{RequestUsage{
+        .input_tokens = prompt_tokens->get<std::uint64_t>(),
+        .cached_input_tokens = cached_input_tokens,
+        .output_tokens = completion_tokens->get<std::uint64_t>(),
+        .cache_read_input_tokens = cached_input_tokens,
+        .quality = UsageQuality::Exact,
+    }});
+    usage_emitted_ = true;
+}
+
+void StreamDecoder::flush_tool_calls(const ProviderEventSink& sink)
 {
     // map 保证按 index 升序发出，工具调用顺序才是确定的。
     for (auto& [index, accumulator] : tools_) {
@@ -90,7 +145,7 @@ void StreamDecoder::flush_tool_calls(const EventSink& sink)
             args = nlohmann::json::object();
         }
 
-        sink(Msg{StreamToolCall{
+        sink(ProviderEvent{StreamToolCall{
             .id = accumulator.id,
             .name = accumulator.name,
             .args = std::move(args),
@@ -99,15 +154,15 @@ void StreamDecoder::flush_tool_calls(const EventSink& sink)
     tools_.clear();
 }
 
-void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
+void StreamDecoder::handle_event(const sse::Event& event, const ProviderEventSink& sink)
 {
+    if (finished_) {
+        return;
+    }
+
     // 收尾是字面量 sentinel，不是结构化事件 —— OpenAI SSE 的一个怪癖。
     if (event.data == "[DONE]") {
-        if (!finished_) {
-            flush_tool_calls(sink);
-            finished_ = true;
-            sink(Msg{StreamFinished{}});
-        }
+        finish(sink);
         return;
     }
 
@@ -120,11 +175,26 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
     if (error != frame.end() && error->is_object()) {
         if (!finished_) {
             finished_ = true;
-            sink(Msg{StreamError{
-                .message = error->value("message", std::string{"openai stream error"}),
+            const auto normalized = normalize_error(
+                "openai", 0, frame.dump());
+            sink(ProviderEvent{StreamError{
+                .message = normalized.message.empty()
+                    ? error->value(
+                        "message", std::string{"openai stream error"})
+                    : normalized.message,
+                .provider_error = normalized.metadata,
             }});
         }
         return;
+    }
+
+    const auto usage = frame.find("usage");
+    if (usage != frame.end()) {
+        emit_usage(*usage, sink);
+        if (finish_seen_ && usage_emitted_) {
+            finish(sink);
+            return;
+        }
     }
 
     const auto choices = frame.find("choices");
@@ -139,7 +209,7 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
         // content 在角色声明帧里是空串，投出空 delta 只会在 Model 里留噪声。
         const std::string content = delta->value("content", std::string{});
         if (!content.empty()) {
-            sink(Msg{StreamTextDelta{.text = content}});
+            sink(ProviderEvent{StreamTextDelta{.text = content}});
         }
 
         const auto tool_calls = delta->find("tool_calls");
@@ -175,8 +245,10 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
     const auto finish_reason = choice.find("finish_reason");
     if (finish_reason != choice.end() && finish_reason->is_string() && !finished_) {
         flush_tool_calls(sink);
-        finished_ = true;
-        sink(Msg{StreamFinished{}});
+        finish_seen_ = true;
+        if (usage_emitted_) {
+            finish(sink);
+        }
     }
 }
 
@@ -199,12 +271,16 @@ std::string build_request_body(std::string_view model, const Request& request)
     nlohmann::json body{
         {"model", std::string{model}},
         {"stream", true},
+        {"stream_options", nlohmann::json{{"include_usage", true}}},
         {"messages", std::move(messages)},
     };
 
     if (!request.tools.empty()) {
         body["tools"] = encode_tools(request.tools);
     }
+    // This adapter targets Chat Completions, where max_tokens is the
+    // portable output-limit field (Responses uses a different name).
+    body["max_tokens"] = request.max_output_tokens;
 
     return body.dump();
 }
@@ -221,7 +297,7 @@ StreamEffect make_stream(
         model = std::move(model),
         api_key = std::move(api_key),
         client = std::move(client)
-    ](Request request, EventSink sink) {
+    ](Request request, ProviderEventSink sink) {
         const http::HttpRequest wire{
             .host = host,
             .port = 443,
@@ -243,8 +319,15 @@ StreamEffect make_stream(
                 return true;
             });
 
-        if (!result) {
-            sink(Msg{StreamError{.message = result.error().message}});
+        if (result) {
+            decoder.finish(sink);
+        } else if (!decoder.terminal_emitted()) {
+            const auto normalized = normalize_error(
+                "openai", result.error().status, result.error().message);
+            sink(ProviderEvent{StreamError{
+                .message = normalized.message,
+                .provider_error = normalized.metadata,
+            }});
         }
     };
 }

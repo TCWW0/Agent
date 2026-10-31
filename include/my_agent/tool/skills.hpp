@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,7 +30,9 @@ class SkillEngine {
 public:
     // roots 按优先级从高到低。构造时注入而不是内部读环境 —— 与 MemoryStore、
     // make_read_tool 同一个约定，纯逻辑才能喂临时目录测。
-    explicit SkillEngine(std::vector<std::filesystem::path> roots);
+    explicit SkillEngine(
+        std::vector<std::filesystem::path> roots,
+        std::function<bool(const std::filesystem::path&)> register_read_root = {});
 
     // 同名 skill 首个命中的根胜出（project 覆盖 user）。
     //
@@ -54,6 +57,7 @@ public:
 
 private:
     std::vector<std::filesystem::path> roots_;
+    std::function<bool(const std::filesystem::path&)> register_read_root_;
 };
 
 // 唯一碰环境的函数。优先级：project 的两个根在前，user 的两个根在后，所以

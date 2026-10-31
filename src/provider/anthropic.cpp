@@ -1,10 +1,13 @@
 #include "my_agent/provider/anthropic.hpp"
+#include "my_agent/provider/error.hpp"
 
 #include "my_agent/domain/conversation.hpp"
 #include "my_agent/runtime/msg.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -85,15 +88,59 @@ void append_message(nlohmann::json& messages, const Message& message)
 
 }  // namespace
 
-void StreamDecoder::feed(std::string_view chunk, const EventSink& sink)
+void StreamDecoder::feed(std::string_view chunk, const ProviderEventSink& sink)
 {
     assembler_.feed(chunk, [this, &sink](const sse::Event& event) {
         handle_event(event, sink);
     });
 }
 
-void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
+void StreamDecoder::emit_usage(const ProviderEventSink& sink)
 {
+    if (usage_emitted_ || !input_usage_seen_ || !output_usage_seen_) {
+        return;
+    }
+
+    const std::uint64_t cache_read = cache_read_input_tokens_.value_or(0);
+    const std::uint64_t cache_creation =
+        cache_creation_input_tokens_.value_or(0);
+    std::optional<std::uint64_t> cached_input_tokens;
+    if (cache_read_input_tokens_ || cache_creation_input_tokens_) {
+        cached_input_tokens = cache_read + cache_creation;
+    }
+
+    sink(ProviderEvent{RequestUsage{
+        .input_tokens = input_tokens_ + cache_read + cache_creation,
+        .cached_input_tokens = cached_input_tokens,
+        .output_tokens = output_tokens_,
+        .cache_read_input_tokens = cache_read_input_tokens_,
+        .cache_creation_input_tokens = cache_creation_input_tokens_,
+        .quality = UsageQuality::Exact,
+    }});
+    usage_emitted_ = true;
+}
+
+void StreamDecoder::finish(const ProviderEventSink& sink)
+{
+    if (finished_) {
+        return;
+    }
+    emit_usage(sink);
+    finished_ = true;
+    sink(ProviderEvent{StreamFinished{}});
+}
+
+bool StreamDecoder::terminal_emitted() const noexcept
+{
+    return finished_;
+}
+
+void StreamDecoder::handle_event(const sse::Event& event, const ProviderEventSink& sink)
+{
+    if (finished_) {
+        return;
+    }
+
     const nlohmann::json frame = nlohmann::json::parse(event.data, nullptr, false);
     if (frame.is_discarded() || !frame.is_object()) {
         return;
@@ -102,6 +149,59 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
     // event 名与 data.type 总是一致，但 OpenAI 那边没有 event 名，所以统一以
     // data 里的 type 为准 —— 让两个 provider 的解码器结构对称。
     const std::string type = frame.value("type", std::string{});
+
+    if (type == "message_start") {
+        const auto message = frame.find("message");
+        if (message == frame.end() || !message->is_object()) {
+            return;
+        }
+        const auto usage = message->find("usage");
+        if (usage == message->end() || !usage->is_object()) {
+            return;
+        }
+
+        const auto input = usage->find("input_tokens");
+        if (input != usage->end() && input->is_number_unsigned()) {
+            input_tokens_ = input->get<std::uint64_t>();
+            input_usage_seen_ = true;
+        }
+        const auto cache_read = usage->find("cache_read_input_tokens");
+        if (cache_read != usage->end() && cache_read->is_number_unsigned()) {
+            cache_read_input_tokens_ = cache_read->get<std::uint64_t>();
+        }
+        const auto cache_creation = usage->find("cache_creation_input_tokens");
+        if (cache_creation != usage->end()
+            && cache_creation->is_number_unsigned()) {
+            cache_creation_input_tokens_ =
+                cache_creation->get<std::uint64_t>();
+        }
+        return;
+    }
+
+    if (type == "message_delta") {
+        const nlohmann::json* usage = nullptr;
+        const auto frame_usage = frame.find("usage");
+        if (frame_usage != frame.end() && frame_usage->is_object()) {
+            usage = &*frame_usage;
+        } else {
+            const auto delta = frame.find("delta");
+            if (delta != frame.end() && delta->is_object()) {
+                const auto delta_usage = delta->find("usage");
+                if (delta_usage != delta->end() && delta_usage->is_object()) {
+                    usage = &*delta_usage;
+                }
+            }
+        }
+        if (usage != nullptr) {
+            const auto output = usage->find("output_tokens");
+            if (output != usage->end() && output->is_number_unsigned()) {
+                output_tokens_ = std::max(
+                    output_tokens_, output->get<std::uint64_t>());
+                output_usage_seen_ = true;
+            }
+        }
+        return;
+    }
 
     if (type == "content_block_start") {
         const auto block = frame.find("content_block");
@@ -129,7 +229,7 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
         if (delta_type == "text_delta") {
             const std::string text = delta->value("text", std::string{});
             if (!text.empty()) {
-                sink(Msg{StreamTextDelta{.text = text}});
+                sink(ProviderEvent{StreamTextDelta{.text = text}});
             }
             return;
         }
@@ -154,7 +254,7 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
             args = nlohmann::json::object();
         }
 
-        sink(Msg{StreamToolCall{
+        sink(ProviderEvent{StreamToolCall{
             .id = tool_id_,
             .name = tool_name_,
             .args = std::move(args),
@@ -171,7 +271,7 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
     // Anthropic 侧就靠它们满足 —— message_stop 是正常收尾，error 是流中途
     // 出错（超载、上下文超限），两者都必须让回合结束而不是悬着。
     if (type == "message_stop") {
-        sink(Msg{StreamFinished{}});
+        finish(sink);
         return;
     }
 
@@ -181,7 +281,15 @@ void StreamDecoder::handle_event(const sse::Event& event, const EventSink& sink)
         if (error != frame.end() && error->is_object()) {
             message = error->value("message", message);
         }
-        sink(Msg{StreamError{.message = std::move(message)}});
+        const auto normalized = normalize_error(
+            "anthropic", 0, frame.dump());
+        finished_ = true;
+        sink(ProviderEvent{StreamError{
+            .message = normalized.message.empty()
+                ? std::move(message)
+                : normalized.message,
+            .provider_error = normalized.metadata,
+        }});
     }
 }
 
@@ -197,7 +305,7 @@ StreamEffect make_stream(
         model = std::move(model),
         api_key = std::move(api_key),
         client = std::move(client)
-    ](Request request, EventSink sink) {
+    ](Request request, ProviderEventSink sink) {
         const http::HttpRequest wire{
             .host = host,
             .port = 443,
@@ -222,8 +330,15 @@ StreamEffect make_stream(
 
         // 成功路径上 message_stop 已经投过 StreamFinished，失败路径在这里补齐
         // 宿主要求的「恰好一个终态事件」。
-        if (!result) {
-            sink(Msg{StreamError{.message = result.error().message}});
+        if (result) {
+            decoder.finish(sink);
+        } else if (!decoder.terminal_emitted()) {
+            const auto normalized = normalize_error(
+                "anthropic", result.error().status, result.error().message);
+            sink(ProviderEvent{StreamError{
+                .message = normalized.message,
+                .provider_error = normalized.metadata,
+            }});
         }
     };
 }
@@ -238,8 +353,8 @@ std::string build_request_body(std::string_view model, const Request& request)
     nlohmann::json body{
         {"model", std::string{model}},
         {"stream", true},
-        // max_tokens 是必填字段，不像 Ollama 可以省。
-        {"max_tokens", 4096},
+        // max_tokens 是必填字段，且必须使用请求自己的 output cap。
+        {"max_tokens", request.max_output_tokens},
         {"messages", std::move(messages)},
     };
 

@@ -22,13 +22,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "my_agent/rag/rag.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 
 namespace my_agent::tool::docs {
 
@@ -38,6 +40,7 @@ struct DocsConfig {
     std::filesystem::path root;
     bool root_missing = false;
     rag::EmbedConfig embed;
+    std::optional<rag::TeiRerankConfig> rerank;
 };
 
 // 纯函数：解析顺序 MY_AGENT_DOCS_DIR 非空 → 用它（存在性由探针判定）；
@@ -59,8 +62,7 @@ struct DocsConfig {
 [[nodiscard]] std::uint64_t
 docs_tree_fingerprint(const std::filesystem::path& root);
 
-// 进程级索引状态。registry 闭包持有一份（函数局部 static，与 registry
-// 同寿命）；execute_search_docs 显式收引用 —— 测试不必碰全局。
+// 索引状态由会话持有；直接注册工厂调用可使用其独立默认实例。
 struct DocsIndex {
     // 串行化「指纹检查 + build + search」整段：并发第二个调用应该等
     // 索引，而不是各建各的。今天 agent 状态机本来就一次只派发一个工具，
@@ -85,7 +87,7 @@ inline constexpr std::size_t kMaxK = 20;
 // 看到它该知道换个查询试试或怀疑环境。chunk 总数让模型在空语料时知道
 // 零结果不可信。零命中 → 正文区只写 "no matching passages"，mode 行照出。
 [[nodiscard]] std::string render_search_results(
-    const rag::Corpus& corpus, const rag::SearchResult& result,
+    const rag::RerankResult& result,
     const DocsConfig& cfg);
 
 // 工具主体：参数校验（InvalidArgs）→ 配置检查（零配置/配错 →
@@ -93,10 +95,14 @@ inline constexpr std::size_t kMaxK = 20;
 // search → render。backend 注入：生产传 rag::ollama_embed，测试传假件。
 [[nodiscard]] ExecResult execute_search_docs(
     const nlohmann::json& args, const DocsConfig& cfg,
-    const rag::EmbedBackend& backend, DocsIndex& index);
+    const rag::EmbedBackend& backend, DocsIndex& index,
+    const rag::RerankBackend& rerank_backend = {});
 
-// registry 组装（胶水）：闭包持有进程级 DocsIndex，每次调用现场
-// resolve_config —— env 是会话中可变的，配置不缓存。
-[[nodiscard]] ToolDef make_search_docs_tool();
+// 原生注册工厂。handler 共享注入的索引与后端，不读取进程级状态。
+[[nodiscard]] RegisteredTool make_search_docs_tool(
+    DocsConfig cfg,
+    std::shared_ptr<DocsIndex> index = std::make_shared<DocsIndex>(),
+    rag::EmbedBackend backend = rag::ollama_embed,
+    rag::RerankBackend rerank_backend = {});
 
 } // namespace my_agent::tool::docs

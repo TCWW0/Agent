@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"q": "migrations", "gold": ["procedure.md"]},
+    {"q": "deployment", "gold": ["procedure.md"]},
+    {"q": "unfindabletokenxyz", "gold": ["procedure.md"]}
+  ]
+}

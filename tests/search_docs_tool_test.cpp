@@ -13,7 +13,6 @@
 //     两个可观测量钉住。
 #include "my_agent/rag/rag.hpp"
 #include "my_agent/tool/search_docs.hpp"
-#include "my_agent/tool/tool.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -258,6 +257,37 @@ TEST(SearchDocsConfig, GarbagePortFallsBackToDefault) {
     EXPECT_EQ(cfg.embed.port, 11434);   // 配置垃圾不崩工具
 }
 
+TEST(SearchDocsConfig, TeiRerankerRequiresHostAndParsesItsEndpoint) {
+    const DocsConfig unset = my_agent::tool::docs::resolve_config(
+        EnvMap{}.getenv(), "/w", DirProbe{}.none());
+    EXPECT_FALSE(unset.rerank.has_value());
+
+    const DocsConfig port_only = my_agent::tool::docs::resolve_config(
+        EnvMap{}.set("MY_AGENT_RERANK_PORT", "9090").getenv(), "/w",
+        DirProbe{}.none());
+    EXPECT_FALSE(port_only.rerank.has_value());
+
+    const DocsConfig with_host = my_agent::tool::docs::resolve_config(
+        EnvMap{}
+            .set("MY_AGENT_RERANK_HOST", "tei.local")
+            .set("MY_AGENT_RERANK_PORT", "9090")
+            .getenv(),
+        "/w", DirProbe{}.none());
+    ASSERT_TRUE(with_host.rerank.has_value());
+    EXPECT_EQ(with_host.rerank->host, "tei.local");
+    EXPECT_EQ(with_host.rerank->port, 9090);
+    EXPECT_EQ(with_host.rerank->timeout_ms, 30000);
+
+    const DocsConfig bad_port = my_agent::tool::docs::resolve_config(
+        EnvMap{}
+            .set("MY_AGENT_RERANK_HOST", "tei.local")
+            .set("MY_AGENT_RERANK_PORT", "invalid")
+            .getenv(),
+        "/w", DirProbe{}.none());
+    ASSERT_TRUE(bad_port.rerank.has_value());
+    EXPECT_EQ(bad_port.rerank->port, 8080);
+}
+
 // ── docs_tree_fingerprint：门禁镜像 build 的 walk ────────────────────────
 
 TEST(DocsFingerprint, StableWithoutChanges) {
@@ -318,100 +348,156 @@ TEST(DocsFingerprint, NestedMarkdownCounts) {
 
 // ── render_search_results：给模型的输出契约 ──────────────────────────────
 
+TEST(RenderRerankResult, RendersPassagesWithoutCorpusAccess) {
+    rag::Corpus corpus;
+    FailIfCalledBackend backend;
+    corpus.build_from_memory(
+        {{"guide.md", "Install the zephyr package before launch.\n"},
+         {"other.md", "Harbor tides follow the lunar schedule.\n"}},
+        backend.fn(), rag::EmbedConfig{});
+
+    const rag::RerankResult result{
+        .retrieval = corpus.retrieve(
+            "zephyr", backend.fn(), rag::EmbedConfig{}, 1),
+        .report = rag::RerankReport{.mode = rag::RerankMode::LocalOnly},
+    };
+    ASSERT_EQ(result.retrieval.passages.size(), 1u);
+    EXPECT_EQ(result.retrieval.corpus_chunk_count, corpus.chunk_count());
+
+    DocsConfig cfg;
+    cfg.root = "/w/docs";
+    const std::string out =
+        my_agent::tool::docs::render_search_results(result, cfg);
+
+    EXPECT_NE(out.find("guide.md:1-1 (score "), std::string::npos);
+    EXPECT_NE(out.find("Install the zephyr package before launch."),
+              std::string::npos);
+    EXPECT_NE(out.find("mode: BM25-only (no embed model configured) — 2 chunks "
+                       "from /w/docs"),
+              std::string::npos);
+    EXPECT_FALSE(backend.called);
+}
+
 class RenderFixture : public ::testing::Test {
 protected:
     void SetUp() override {
-        corpus_.build_from_memory(
-            {{"flux.md", kDocFlux}, {"tides.md", kDocTides}},
-            [](const rag::EmbedConfig&, const std::vector<std::string>&,
-               rag::EmbedRole)
-                -> std::expected<std::vector<std::vector<float>>, std::string> {
-                return std::unexpected(std::string{"render 夹具不嵌"});
+        cfg_.root = "/w/docs";
+        result_.retrieval.corpus_chunk_count = 2;
+    }
+
+    [[nodiscard]] static rag::RankedPassage
+    make_passage(std::string path, std::string text, double score) {
+        return rag::RankedPassage{
+            .provenance = rag::Provenance{
+                .path = std::move(path),
+                .line_start = 1,
+                .line_end = 2,
+                .context = {},
             },
-            rag::EmbedConfig{});   // model 空 → BM25-only，chunks 照常有
-        ASSERT_GE(corpus_.chunk_count(), 2u);
+            .text = std::move(text),
+            .score = score,
+        };
     }
 
-    [[nodiscard]] std::string header_of(std::size_t chunk_id) const {
-        const rag::Chunk& c = corpus_.chunks()[chunk_id];
-        return c.path + ":" + std::to_string(c.line_start) + "-" +
-               std::to_string(c.line_end);
+    [[nodiscard]] static std::string
+    header_of(const rag::RankedPassage& passage) {
+        const rag::Provenance& p = passage.provenance;
+        return p.path + ":" + std::to_string(p.line_start) + "-" +
+               std::to_string(p.line_end);
     }
 
-    rag::Corpus corpus_;
+    rag::RerankResult result_;
     DocsConfig cfg_;
 };
 
 TEST_F(RenderFixture, PassageCarriesPathLineRangeScoreAndText) {
-    cfg_.root = "/w/docs";
-    rag::SearchResult r;
-    r.mode = rag::SearchMode::Hybrid;
-    r.hits = {{0, 0.0312}};
+    result_.retrieval.mode = rag::SearchMode::Hybrid;
+    result_.retrieval.passages = {
+        make_passage("flux.md", kDocFlux, 0.0312)};
     const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
+        my_agent::tool::docs::render_search_results(result_, cfg_);
 
-    EXPECT_NE(out.find(header_of(0) + " (score 0.0312)"), std::string::npos);
+    EXPECT_NE(out.find(header_of(result_.retrieval.passages[0]) +
+                       " (score 0.0312)"),
+              std::string::npos);
     EXPECT_NE(out.find("fluxonium circuits store qubits"),
               std::string::npos);   // 正文要真的在
     EXPECT_NE(out.find("mode: hybrid"), std::string::npos);
 }
 
-TEST_F(RenderFixture, PassagesComeInRankedOrder) {
-    cfg_.root = "/w/docs";
-    rag::SearchResult r;
-    r.mode = rag::SearchMode::Hybrid;
-    r.hits = {{1, 0.03}, {0, 0.02}};
-    const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
+TEST_F(RenderFixture, PassageScoreReflectsFinalRerankOrder) {
+    result_.retrieval.mode = rag::SearchMode::Hybrid;
+    rag::RankedPassage passage =
+        make_passage("flux.md", kDocFlux, 0.0312);
+    passage.rerank = rag::RerankEvidence{
+        .lexical_coverage = 1.0,
+        .model_score = 0.8,
+        .final_score = 0.875,
+    };
+    result_.retrieval.passages = {std::move(passage)};
+    result_.report.mode = rag::RerankMode::ModelEnhanced;
 
-    const auto pos1 = out.find(header_of(1));
-    const auto pos0 = out.find(header_of(0));
-    ASSERT_NE(pos1, std::string::npos);
-    ASSERT_NE(pos0, std::string::npos);
-    EXPECT_LT(pos1, pos0);   // 名次序，不是 chunk-id 序
+    const std::string out =
+        my_agent::tool::docs::render_search_results(result_, cfg_);
+
+    EXPECT_NE(out.find("flux.md:1-2 (score 0.8750)"), std::string::npos);
+    EXPECT_EQ(out.find("(score 0.0312)"), std::string::npos);
+}
+
+TEST_F(RenderFixture, PassagesComeInRankedOrder) {
+    result_.retrieval.mode = rag::SearchMode::Hybrid;
+    result_.retrieval.passages = {
+        make_passage("tides.md", kDocTides, 0.03),
+        make_passage("flux.md", kDocFlux, 0.02),
+    };
+    const std::string out =
+        my_agent::tool::docs::render_search_results(result_, cfg_);
+
+    const auto tides_pos =
+        out.find(header_of(result_.retrieval.passages[0]));
+    const auto flux_pos =
+        out.find(header_of(result_.retrieval.passages[1]));
+    ASSERT_NE(tides_pos, std::string::npos);
+    ASSERT_NE(flux_pos, std::string::npos);
+    EXPECT_LT(tides_pos, flux_pos);   // passage 顺序就是最终名次序
 }
 
 TEST_F(RenderFixture, Bm25OnlyWithoutModelSaysWhy) {
-    cfg_.root = "/w/docs";
-    rag::SearchResult r;
-    r.mode = rag::SearchMode::Bm25Only;
-    r.hits = {{0, 12.7}};
+    result_.retrieval.mode = rag::SearchMode::Bm25Only;
+    result_.retrieval.passages = {
+        make_passage("flux.md", kDocFlux, 12.7)};
     const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
+        my_agent::tool::docs::render_search_results(result_, cfg_);
     EXPECT_NE(out.find("mode: BM25-only (no embed model configured)"),
               std::string::npos);
 }
 
 TEST_F(RenderFixture, Bm25OnlyWithModelSaysEmbedUnavailable) {
-    cfg_.root = "/w/docs";
     cfg_.embed.model = "nomic-embed-text";
-    rag::SearchResult r;
-    r.mode = rag::SearchMode::Bm25Only;   // 配了模型但这次降级（瞬断）
-    r.hits = {{0, 12.7}};
+    result_.retrieval.mode = rag::SearchMode::Bm25Only;
+    result_.retrieval.passages = {
+        make_passage("flux.md", kDocFlux, 12.7)};
     const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
+        my_agent::tool::docs::render_search_results(result_, cfg_);
     EXPECT_NE(out.find("mode: BM25-only (embed unavailable)"),
               std::string::npos);
 }
 
 TEST_F(RenderFixture, ModeLineCarriesProvenance) {
-    cfg_.root = "/w/docs";
-    rag::SearchResult r;
-    r.mode = rag::SearchMode::Hybrid;
-    r.hits = {{0, 0.03}};
+    result_.retrieval.mode = rag::SearchMode::Hybrid;
+    result_.retrieval.passages = {
+        make_passage("flux.md", kDocFlux, 0.03)};
     const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
-    EXPECT_NE(out.find(std::to_string(corpus_.chunk_count()) +
+        my_agent::tool::docs::render_search_results(result_, cfg_);
+    EXPECT_NE(out.find(std::to_string(result_.retrieval.corpus_chunk_count) +
                        " chunks from /w/docs"),
               std::string::npos);   // 空语料时模型据此不信任零结果
 }
 
 TEST_F(RenderFixture, EmptyHitsSayNoMatch) {
-    cfg_.root = "/w/docs";
-    rag::SearchResult r;   // 空命中
-    r.mode = rag::SearchMode::Bm25Only;
+    result_.retrieval.mode = rag::SearchMode::Bm25Only;
     const std::string out =
-        my_agent::tool::docs::render_search_results(corpus_, r, cfg_);
+        my_agent::tool::docs::render_search_results(result_, cfg_);
     EXPECT_NE(out.find("no matching passages"), std::string::npos);
     EXPECT_NE(out.find("mode: BM25-only"), std::string::npos);
 }
@@ -492,6 +578,111 @@ TEST(ExecuteSearchDocs, Bm25OnlyEndToEndWithoutTouchingEmbed) {
               std::string::npos);
     EXPECT_EQ(out.find("flux.md:"), std::string::npos);   // 主题词互斥
     EXPECT_FALSE(backend.called);   // BM25-only 一次都不嵌
+}
+
+TEST(ExecuteSearchDocs, ReturnsPassagesInRerankedOrder) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", "gamma alpha\n");
+    write_file(dir.path() / "b.md", "gamma beta\n");
+    my_agent::tool::docs::DocsIndex index;
+    FailIfCalledBackend embed_backend;
+    const DocsConfig cfg = cfg_for_root(dir.path());
+    const nlohmann::json args{{"query", "gamma"}, {"k", 2}};
+
+    const auto before = my_agent::tool::docs::execute_search_docs(
+        args, cfg, embed_backend.fn(), index);
+    ASSERT_TRUE(before.has_value()) << before.error().render();
+
+    const std::size_t a_before = before->text.find("a.md:");
+    const std::size_t b_before = before->text.find("b.md:");
+    ASSERT_NE(a_before, std::string::npos);
+    ASSERT_NE(b_before, std::string::npos);
+    ASSERT_NE(a_before, b_before);
+
+    const std::string first_path = a_before < b_before ? "a.md:" : "b.md:";
+    const std::string second_path = a_before < b_before ? "b.md:" : "a.md:";
+    const rag::RerankBackend rerank_backend =
+        [](std::string_view,
+           const std::vector<std::string>& passages)
+           -> std::expected<std::vector<double>, std::string> {
+        if (passages.size() != 2u) {
+            return std::unexpected(std::string{"expected two passages"});
+        }
+        return std::vector<double>{0.0, 10.0};
+    };
+
+    const auto after = my_agent::tool::docs::execute_search_docs(
+        args, cfg, embed_backend.fn(), index, rerank_backend);
+    ASSERT_TRUE(after.has_value()) << after.error().render();
+
+    const std::size_t former_first = after->text.find(first_path);
+    const std::size_t former_second = after->text.find(second_path);
+    ASSERT_NE(former_first, std::string::npos);
+    ASSERT_NE(former_second, std::string::npos);
+    EXPECT_LT(former_second, former_first);
+    EXPECT_FALSE(embed_backend.called);
+}
+
+TEST(ExecuteSearchDocs, RerankCanPromoteCandidateOutsideFinalK) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", "gamma gamma alpha\n");
+    write_file(dir.path() / "b.md", "gamma beta beta\n");
+    my_agent::tool::docs::DocsIndex index;
+    FailIfCalledBackend embed_backend;
+    const rag::RerankBackend rerank_backend =
+        [](std::string_view,
+           const std::vector<std::string>& passages)
+           -> std::expected<std::vector<double>, std::string> {
+        std::vector<double> scores;
+        scores.reserve(passages.size());
+        for (const std::string& passage : passages) {
+            scores.push_back(
+                passage.find("beta") == std::string::npos ? 0.0 : 10.0);
+        }
+        return scores;
+    };
+
+    const auto result = my_agent::tool::docs::execute_search_docs(
+        nlohmann::json{{"query", "gamma"}, {"k", 1}},
+        cfg_for_root(dir.path()), embed_backend.fn(), index, rerank_backend);
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(result->text.find("b.md:1-"), std::string::npos);
+    EXPECT_EQ(result->text.find("a.md:1-"), std::string::npos);
+
+    std::size_t passages = 0;
+    for (std::size_t pos = 0;
+         (pos = result->text.find("(score ", pos)) != std::string::npos;
+         pos += 7) {
+        ++passages;
+    }
+    EXPECT_EQ(passages, 1u);
+    EXPECT_FALSE(embed_backend.called);
+}
+
+TEST(ExecuteSearchDocs, ReportsModelFallbackWhileKeepingLocalResults) {
+    TempDir dir;
+    write_file(dir.path() / "guide.md", "gamma deployment guide\n");
+    my_agent::tool::docs::DocsIndex index;
+    FailIfCalledBackend embed_backend;
+    const rag::RerankBackend rerank_backend =
+        [](std::string_view,
+           const std::vector<std::string>&)
+           -> std::expected<std::vector<double>, std::string> {
+        return std::unexpected(std::string{"reranker unavailable"});
+    };
+
+    const auto result = my_agent::tool::docs::execute_search_docs(
+        nlohmann::json{{"query", "gamma"}}, cfg_for_root(dir.path()),
+        embed_backend.fn(), index, rerank_backend);
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(result->text.find("guide.md:1-"), std::string::npos);
+    EXPECT_NE(result->text.find("gamma deployment guide"), std::string::npos);
+    EXPECT_NE(result->text.find(
+                  "rerank: model-fallback — reranker unavailable"),
+              std::string::npos);
+    EXPECT_FALSE(embed_backend.called);
 }
 
 TEST(ExecuteSearchDocs, HybridFindsWhatLexicalCannot) {
@@ -645,33 +836,80 @@ TEST(ExecuteSearchDocs, ConcurrentCallsSerializeSafely) {
 // ── registry 接线（胶水面）────────────────────────────────────────────────
 
 TEST(SearchDocsRegistration, SchemaAndEffectsDeclared) {
-    const my_agent::tool::ToolDef* def = my_agent::tool::find("search_docs");
-    ASSERT_NE(def, nullptr);
-    EXPECT_FALSE(def->description.empty());
+    const my_agent::tool::RegisteredTool registration =
+        my_agent::tool::docs::make_search_docs_tool(DocsConfig{});
+    const auto& descriptor = registration.descriptor;
+    EXPECT_EQ("search_docs", descriptor.name.value);
+    EXPECT_FALSE(descriptor.description.empty());
 
-    EXPECT_TRUE(def->input_schema.contains("properties"));
-    EXPECT_TRUE(def->input_schema["properties"].contains("query"));
-    EXPECT_TRUE(def->input_schema["properties"].contains("k"));
-    ASSERT_TRUE(def->input_schema.contains("required"));
-    ASSERT_TRUE(def->input_schema["required"].is_array());
-    ASSERT_EQ(def->input_schema["required"].size(), 1u);
-    EXPECT_EQ(def->input_schema["required"][0], "query");
+    EXPECT_TRUE(descriptor.input_schema.contains("properties"));
+    EXPECT_TRUE(descriptor.input_schema["properties"].contains("query"));
+    EXPECT_TRUE(descriptor.input_schema["properties"].contains("k"));
+    ASSERT_TRUE(descriptor.input_schema.contains("required"));
+    ASSERT_TRUE(descriptor.input_schema["required"].is_array());
+    ASSERT_EQ(descriptor.input_schema["required"].size(), 1u);
+    EXPECT_EQ(descriptor.input_schema["required"][0], "query");
 
     // 诚实全声明（#43 拍板）：读文档 + 写缓存 + localhost embed
-    EXPECT_TRUE(def->effects.has(my_agent::tool::Effect::ReadFs));
-    EXPECT_TRUE(def->effects.has(my_agent::tool::Effect::WriteFs));
-    EXPECT_TRUE(def->effects.has(my_agent::tool::Effect::Net));
+    EXPECT_TRUE(descriptor.effects.has(my_agent::tool::Effect::ReadFs));
+    EXPECT_TRUE(descriptor.effects.has(my_agent::tool::Effect::WriteFs));
+    EXPECT_TRUE(descriptor.effects.has(my_agent::tool::Effect::Net));
 }
 
-TEST(SearchDocsRegistration, ZeroConfigThroughRealRegistry) {
-    // 真注册表走一遍零配置路径（不崩 + 可操作错误）。
-    // 测试进程 cwd 有 ./docs 或设了 MY_AGENT_DOCS_DIR 时无零配置可言，跳过。
-    if (std::getenv("MY_AGENT_DOCS_DIR") != nullptr ||
-        fs::is_directory(fs::path{"docs"})) {
-        GTEST_SKIP() << "docs 已配置，零配置路径不可测";
-    }
-    const auto result = my_agent::tool::execute(
-        "search_docs", nlohmann::json{{"query", "anything"}});
+TEST(SearchDocsRegistration, InjectedRerankerFlowsThroughNativeFactory) {
+    TempDir dir;
+    write_file(dir.path() / "a.md", "gamma alpha\n");
+    write_file(dir.path() / "b.md", "gamma beta\n");
+    const DocsConfig cfg = cfg_for_root(dir.path());
+    auto index = std::make_shared<my_agent::tool::docs::DocsIndex>();
+    FailIfCalledBackend embed_backend;
+    const nlohmann::json args{{"query", "gamma"}, {"k", 2}};
+
+    const auto baseline_registration =
+        my_agent::tool::docs::make_search_docs_tool(
+            cfg, index, embed_backend.fn());
+    const auto before = baseline_registration.handler(
+        args, my_agent::tool::ToolExecutionContext{});
+    ASSERT_TRUE(before.has_value()) << before.error().render();
+
+    const std::size_t a_before = before->text.find("a.md:");
+    const std::size_t b_before = before->text.find("b.md:");
+    ASSERT_NE(a_before, std::string::npos);
+    ASSERT_NE(b_before, std::string::npos);
+    ASSERT_NE(a_before, b_before);
+    const std::string first_path = a_before < b_before ? "a.md:" : "b.md:";
+    const std::string second_path = a_before < b_before ? "b.md:" : "a.md:";
+
+    const rag::RerankBackend rerank_backend =
+        [](std::string_view,
+           const std::vector<std::string>& passages)
+           -> std::expected<std::vector<double>, std::string> {
+        if (passages.size() != 2u) {
+            return std::unexpected(std::string{"expected two passages"});
+        }
+        return std::vector<double>{0.0, 10.0};
+    };
+    const auto rerank_registration =
+        my_agent::tool::docs::make_search_docs_tool(
+            cfg, index, embed_backend.fn(), rerank_backend);
+    const auto after = rerank_registration.handler(
+        args, my_agent::tool::ToolExecutionContext{});
+    ASSERT_TRUE(after.has_value()) << after.error().render();
+
+    const std::size_t former_first = after->text.find(first_path);
+    const std::size_t former_second = after->text.find(second_path);
+    ASSERT_NE(former_first, std::string::npos);
+    ASSERT_NE(former_second, std::string::npos);
+    EXPECT_LT(former_second, former_first);
+    EXPECT_FALSE(embed_backend.called);
+}
+
+TEST(SearchDocsRegistration, ZeroConfigThroughNativeFactory) {
+    const auto registration =
+        my_agent::tool::docs::make_search_docs_tool(DocsConfig{});
+    const auto result = registration.handler(
+        nlohmann::json{{"query", "anything"}},
+        my_agent::tool::ToolExecutionContext{});
     ASSERT_FALSE(result.has_value());
     EXPECT_NE(result.error().message.find("MY_AGENT_DOCS_DIR"),
               std::string::npos);

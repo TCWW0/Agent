@@ -1,7 +1,7 @@
 #include "my_agent/domain/profile.hpp"
 #include "my_agent/tool/effects.hpp"
 #include "my_agent/tool/policy.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "../src/tool/calculator.hpp"
 
 #include <gtest/gtest.h>
 
@@ -123,28 +123,28 @@ TEST(ToolPolicyTest, NetEffectIsAllowedOnlyByWriteProfile)
 
 TEST(ToolPolicyTest, CalculatorIsPureAndAllowedByEveryProfile)
 {
-    const my_agent::tool::ToolDef* calculator =
-        my_agent::tool::find("calculator");
-    ASSERT_NE(nullptr, calculator);
+    const my_agent::tool::RegisteredTool calculator =
+        my_agent::tool::detail::make_calculator_tool();
+    EXPECT_EQ(my_agent::tool::EffectSet{}, calculator.descriptor.effects);
 
     EXPECT_EQ(
         my_agent::tool::policy::Decision::Allow,
         my_agent::tool::policy::permission(
-            calculator->effects,
+            calculator.descriptor.effects,
             my_agent::Profile::Write
         )
     );
     EXPECT_EQ(
         my_agent::tool::policy::Decision::Allow,
         my_agent::tool::policy::permission(
-            calculator->effects,
+            calculator.descriptor.effects,
             my_agent::Profile::Ask
         )
     );
     EXPECT_EQ(
         my_agent::tool::policy::Decision::Allow,
         my_agent::tool::policy::permission(
-            calculator->effects,
+            calculator.descriptor.effects,
             my_agent::Profile::Minimal
         )
     );

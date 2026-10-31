@@ -50,8 +50,9 @@ FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 # — the very thing this project exists to demonstrate. Rendering only; the
 # event loop stays ours. Do not reintroduce run<Program>() as a "simplification".
 #
-# 当前分支依赖本地 Maya 的 SolidCell 扩展（基于 cc35bcf）。默认使用项目内
-# 的 maya/ 工作副本；显式传入 FETCHCONTENT_SOURCE_DIR_MAYA 时仍以调用方为准。
+# 当前分支依赖本地 Maya 的 SolidCell 扩展；动画宿主接缝在本地提交
+# 8da8707（及其祖先）中。默认使用项目内 maya/ 工作副本；显式传入
+# FETCHCONTENT_SOURCE_DIR_MAYA 时仍以调用方为准。
 # 该扩展尚未进入远程仓库，因此不能伪装成可回退到旧上游 pin。
 #
 # Two options MUST be forced off before MakeAvailable:
@@ -93,13 +94,18 @@ find_package(Threads REQUIRED)
 
 add_library(
     my_agent_tools
+    src/tool/list_dir.cpp
     src/tool/read.cpp
-    src/tool/registry.cpp
+    src/tool/read_roots.cpp
+    src/tool/tool_protocol.cpp
+    src/tool/tool_runtime.cpp
     src/tool/memory_store.cpp
     src/tool/memory_tools.cpp
     src/tool/skills.cpp
     src/tool/skill_tools.cpp
     src/tool/docs_tools.cpp
+    src/tool/session_services.cpp
+    src/tool/calculator.cpp
 )
 
 target_include_directories(
@@ -128,6 +134,8 @@ add_library(
     src/rag/corpus.cpp
     src/rag/embed.cpp
     src/rag/hybrid.cpp
+    src/rag/rerank.cpp
+    src/rag/tei_rerank.cpp
 )
 
 # 接口纯净原则（#41 拍板）：http/json 是 rag 的实现依赖，PRIVATE ——
@@ -167,6 +175,23 @@ target_link_libraries(
 gtest_discover_tests(
     rag_test
     TEST_PREFIX "rag."
+)
+
+add_executable(
+    tei_rerank_smoke_test
+    tests/tei_rerank_smoke_test.cpp
+)
+
+target_link_libraries(
+    tei_rerank_smoke_test
+    PRIVATE
+        my_agent_rag
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    tei_rerank_smoke_test
+    TEST_PREFIX "tei_rerank_smoke."
 )
 
 # search_docs 工具（#43）：search_docs.hpp 公共接缝暴露 rag 类型，故
@@ -237,6 +262,11 @@ add_library(
     my_agent_core
     src/domain/conversation.cpp
     src/runtime/agent.cpp
+    src/runtime/compaction.cpp
+    src/runtime/context.cpp
+    src/runtime/generic_unicode_estimator.cpp
+    src/runtime/request_preparation.cpp
+    src/runtime/usage.cpp
 )
 
 target_include_directories(
@@ -272,42 +302,55 @@ gtest_discover_tests(
     TEST_PREFIX "agent_loop."
 )
 
-add_library(
-    my_agent_headless
-    src/runtime/headless_runner.cpp
-)
-
-target_include_directories(
-    my_agent_headless
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_headless
-    PUBLIC cxx_std_26
-)
-
-target_link_libraries(
-    my_agent_headless
-    PUBLIC my_agent_core
-)
-
 add_executable(
-    headless_runner_test
-    tests/headless_runner_test.cpp
+    context_admission_test
+    tests/context_admission_test.cpp
 )
 
 target_link_libraries(
-    headless_runner_test
+    context_admission_test
     PRIVATE
-        my_agent_headless
+        my_agent_core
         GTest::gtest_main
 )
 
 gtest_discover_tests(
-    headless_runner_test
-    TEST_PREFIX "headless_runner."
+    context_admission_test
+    TEST_PREFIX "context_admission."
+)
+
+add_executable(
+    context_maintenance_test
+    tests/context_maintenance_test.cpp
+)
+
+target_link_libraries(
+    context_maintenance_test
+    PRIVATE
+        my_agent_async_runtime
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    context_maintenance_test
+    TEST_PREFIX "context_maintenance."
+)
+
+add_executable(
+    compaction_test
+    tests/compaction_test.cpp
+)
+
+target_link_libraries(
+    compaction_test
+    PRIVATE
+        my_agent_core
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    compaction_test
+    TEST_PREFIX "compaction."
 )
 
 add_library(
@@ -344,12 +387,30 @@ target_link_libraries(
     async_host_test
     PRIVATE
         my_agent_async_runtime
+        my_agent_prompt
         GTest::gtest_main
 )
 
 gtest_discover_tests(
     async_host_test
     TEST_PREFIX "async_host."
+)
+
+add_executable(
+    ts005_resolved_stream_calls_test
+    tests/ts005_resolved_stream_calls_test.cpp
+)
+
+target_link_libraries(
+    ts005_resolved_stream_calls_test
+    PRIVATE
+        my_agent_async_runtime
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    ts005_resolved_stream_calls_test
+    TEST_PREFIX "ts005."
 )
 
 add_executable(
@@ -360,7 +421,7 @@ add_executable(
 target_link_libraries(
     tool_loop_test
     PRIVATE
-        my_agent_headless
+        my_agent_core
         GTest::gtest_main
 )
 
@@ -384,6 +445,74 @@ target_link_libraries(
 gtest_discover_tests(
     tool_policy_test
     TEST_PREFIX "tool_policy."
+)
+
+add_executable(
+    tool_effects_test
+    tests/tool_effects_test.cpp
+)
+
+target_link_libraries(
+    tool_effects_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    tool_effects_test
+    TEST_PREFIX "tool_effects."
+)
+
+add_executable(
+    tool_runtime_test
+    tests/tool_runtime_test.cpp
+)
+
+target_link_libraries(
+    tool_runtime_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    tool_runtime_test
+    TEST_PREFIX "tool_runtime."
+)
+
+add_executable(
+    session_services_test
+    tests/session_services_test.cpp
+)
+
+target_link_libraries(
+    session_services_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    session_services_test
+    TEST_PREFIX "session_services."
+)
+
+add_executable(
+    ts007_native_registration_contract_test
+    tests/ts007_native_registration_contract_test.cpp
+)
+
+target_link_libraries(
+    ts007_native_registration_contract_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    ts007_native_registration_contract_test
+    TEST_PREFIX "ts007_native_registration_contract."
 )
 
 add_executable(
@@ -449,6 +578,21 @@ gtest_discover_tests(
 )
 
 add_executable(
+    list_dir_tool_test
+    tests/list_dir_tool_test.cpp
+)
+target_link_libraries(
+    list_dir_tool_test
+    PRIVATE
+        my_agent_tools
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    list_dir_tool_test
+    TEST_PREFIX "list_dir_tool."
+)
+
+add_executable(
     wake_signal_test
     tests/wake_signal_test.cpp
 )
@@ -485,6 +629,7 @@ gtest_discover_tests(
 # Provider 传输层：把线上 wire 格式翻译成 Msg
 add_library(
     my_agent_provider
+    src/provider/error.cpp
     src/provider/ollama.cpp
     src/provider/sse.cpp
     src/provider/anthropic.cpp
@@ -507,6 +652,41 @@ target_link_libraries(
     PUBLIC
         my_agent_core
         my_agent_http
+)
+
+add_executable(
+    ts006_tool_execution_report_test
+    tests/ts006_tool_execution_report_test.cpp
+)
+
+target_link_libraries(
+    ts006_tool_execution_report_test
+    PRIVATE
+        my_agent_async_runtime
+        my_agent_provider
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    ts006_tool_execution_report_test
+    TEST_PREFIX "ts006."
+)
+
+add_executable(
+    tool_replay_test
+    tests/tool_replay_test.cpp
+)
+
+target_link_libraries(
+    tool_replay_test
+    PRIVATE
+        my_agent_provider
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    tool_replay_test
+    TEST_PREFIX "tool_replay."
 )
 
 add_executable(
@@ -575,6 +755,23 @@ target_link_libraries(
 gtest_discover_tests(
     openai_transport_test
     TEST_PREFIX "openai_transport."
+)
+
+add_executable(
+    provider_error_test
+    tests/provider_error_test.cpp
+)
+
+target_link_libraries(
+    provider_error_test
+    PRIVATE
+        my_agent_provider
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    provider_error_test
+    TEST_PREFIX "provider_error."
 )
 
 # 系统提示构建器：build() 保持纯，只有 capture_environment 碰 IO
@@ -666,64 +863,6 @@ gtest_discover_tests(
     TEST_PREFIX "ghost_line_probe."
 )
 
-# TUI 视图投影：Model -> Frame。纯函数，不碰终端，可脱离 tty 单测。
-add_library(
-    my_agent_ui_markdown
-    src/ui/markdown_scanner.cpp
-)
-
-target_include_directories(
-    my_agent_ui_markdown
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_ui_markdown
-    PUBLIC cxx_std_26
-)
-
-add_library(
-    my_agent_ui_view
-    src/ui/view.cpp
-)
-
-target_include_directories(
-    my_agent_ui_view
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_ui_view
-    PUBLIC cxx_std_26
-)
-
-target_link_libraries(
-    my_agent_ui_view
-    PUBLIC
-        my_agent_core
-        my_agent_ui_input_layout
-        my_agent_ui_markdown
-        my_agent_ui_status_bar
-)
-
-add_library(
-    my_agent_ui_status_bar
-    src/ui/status_bar.cpp
-)
-
-target_include_directories(
-    my_agent_ui_status_bar
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_ui_status_bar
-    PUBLIC cxx_std_26
-)
-
 add_executable(
     status_bar_test
     tests/status_bar_test.cpp
@@ -732,7 +871,8 @@ add_executable(
 target_link_libraries(
     status_bar_test
     PRIVATE
-        my_agent_ui_status_bar
+        my_agent_ui_screen
+        my_agent_virtual_terminal
         GTest::gtest_main
 )
 
@@ -741,97 +881,47 @@ gtest_discover_tests(
     TEST_PREFIX "status_bar."
 )
 
-add_executable(
-    view_test
-    tests/view_test.cpp
-)
-
-target_link_libraries(
-    view_test
-    PRIVATE
-        my_agent_ui_view
-        GTest::gtest_main
-)
-
-gtest_discover_tests(
-    view_test
-    TEST_PREFIX "view."
-)
-
-add_executable(
-    markdown_scanner_test
-    tests/markdown_scanner_test.cpp
-)
-
-target_include_directories(
-    markdown_scanner_test
-    PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    markdown_scanner_test
-    PRIVATE cxx_std_26
-)
-
-target_link_libraries(
-    markdown_scanner_test
-    PRIVATE
-        my_agent_ui_markdown
-        GTest::gtest_main
-)
-
-gtest_discover_tests(
-    markdown_scanner_test
-    TEST_PREFIX "markdown_scanner."
-)
-
-# TUI Maya projection: our own Frame/StyledLine IR -> maya::Element. This is the
-# only place the pure view projection learns about Maya types.
+# 语义屏幕（issue #26）：Model + UiState → maya widget Config 的纯投影。
+# transcript 与 dock 在结构上分离；视觉来自 maya 现成 widget，
+# dock 的组合语义归本项目。
 add_library(
-    my_agent_ui_maya
-    src/ui/maya_projection.cpp
+    my_agent_ui_transcript_guidance
+    src/ui/transcript_guidance.cpp
 )
 
 target_include_directories(
-    my_agent_ui_maya
+    my_agent_ui_transcript_guidance
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
 target_compile_features(
-    my_agent_ui_maya
+    my_agent_ui_transcript_guidance
     PUBLIC cxx_std_26
 )
 
 target_link_libraries(
-    my_agent_ui_maya
-    PUBLIC
-        my_agent_ui_view
-        maya
+    my_agent_ui_transcript_guidance
+    PUBLIC my_agent_core
 )
 
 add_executable(
-    maya_projection_test
-    tests/maya_projection_test.cpp
+    transcript_guidance_test
+    tests/transcript_guidance_test.cpp
 )
 
 target_link_libraries(
-    maya_projection_test
+    transcript_guidance_test
     PRIVATE
-        my_agent_ui_maya
-        my_agent_virtual_terminal
+        my_agent_ui_transcript_guidance
         GTest::gtest_main
 )
 
 gtest_discover_tests(
-    maya_projection_test
-    TEST_PREFIX "maya_projection."
+    transcript_guidance_test
+    TEST_PREFIX "transcript_guidance."
 )
 
-# 语义屏幕（issue #26）：Model + UiState → maya widget Config 的纯投影。
-# transcript 与 dock 在结构上分离；视觉来自 maya 现成 widget，
-# dock 的组合语义归本项目。自有 Frame IR 的逐片退役由此开始。
 add_library(
     my_agent_ui_screen
     src/ui/screen.cpp
@@ -851,7 +941,9 @@ target_compile_features(
 target_link_libraries(
     my_agent_ui_screen
     PUBLIC
-        my_agent_ui_view
+        my_agent_core
+        my_agent_ui_composer_paste
+        my_agent_ui_transcript_guidance
         maya
 )
 
@@ -882,6 +974,7 @@ add_executable(
 target_link_libraries(
     dock_layout_test
     PRIVATE
+        my_agent_ui_painter
         my_agent_ui_screen
         my_agent_virtual_terminal
         GTest::gtest_main
@@ -936,10 +1029,14 @@ target_link_libraries(
     my_agent_ui_loop
     PUBLIC
         my_agent_async_runtime
+        my_agent_ui_transcript_guidance
         my_agent_ui_clock
         my_agent_ui_input_editor
         my_agent_ui_input
-        my_agent_ui_terminal
+        my_agent_ui_composer_paste
+        my_agent_ui_config
+        my_agent_ui_painter
+        my_agent_ui_terminal_session
 )
 
 add_executable(
@@ -975,6 +1072,39 @@ target_link_libraries(
 gtest_discover_tests(
     ui_loop_test
     TEST_PREFIX "ui_loop."
+)
+
+add_library(
+    my_agent_ui_config
+    src/ui/ui_config.cpp
+)
+
+target_include_directories(
+    my_agent_ui_config
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_ui_config
+    PUBLIC cxx_std_26
+)
+
+add_executable(
+    ui_config_test
+    tests/ui_config_test.cpp
+)
+
+target_link_libraries(
+    ui_config_test
+    PRIVATE
+        my_agent_ui_config
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    ui_config_test
+    TEST_PREFIX "ui_config."
 )
 
 # TUI 按键解码：字节流 -> 按键。纯状态机，不碰终端，跨 read 边界的 UTF-8 在这里缝合。
@@ -1016,6 +1146,22 @@ add_library(
     src/ui/input_editor.cpp
 )
 
+add_library(
+    my_agent_ui_composer_paste
+    src/ui/composer_paste.cpp
+)
+
+target_include_directories(
+    my_agent_ui_composer_paste
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_ui_composer_paste
+    PUBLIC cxx_std_26
+)
+
 target_include_directories(
     my_agent_ui_input_editor
     PUBLIC
@@ -1031,6 +1177,7 @@ target_link_libraries(
     my_agent_ui_input_editor
     PUBLIC
         my_agent_ui_input
+        my_agent_ui_composer_paste
 )
 
 add_executable(
@@ -1050,43 +1197,11 @@ gtest_discover_tests(
     TEST_PREFIX "input_editor."
 )
 
-add_library(
-    my_agent_ui_input_layout
-    src/ui/input_layout.cpp
-)
-
-target_include_directories(
-    my_agent_ui_input_layout
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_features(
-    my_agent_ui_input_layout
-    PUBLIC cxx_std_26
-)
-
-add_executable(
-    input_layout_test
-    tests/input_layout_test.cpp
-)
-
-target_link_libraries(
-    input_layout_test
-    PRIVATE
-        my_agent_ui_input_layout
-        GTest::gtest_main
-)
-
-gtest_discover_tests(
-    input_layout_test
-    TEST_PREFIX "input_layout."
-)
-
 # TUI 帧率合并：纯判定，时间由调用方注入，因此可确定性测试而无需 sleep。
 add_library(
     my_agent_ui_clock
     src/ui/repaint_clock.cpp
+    src/ui/stream_rate.cpp
 )
 
 target_include_directories(
@@ -1117,29 +1232,101 @@ gtest_discover_tests(
     TEST_PREFIX "repaint_clock."
 )
 
-# TUI terminal driver: owns termios/raw-mode and the Maya render/write/commit
-# boundary. It does not generate frame bytes itself.
+add_executable(
+    stream_rate_test
+    tests/stream_rate_test.cpp
+)
+
+target_link_libraries(
+    stream_rate_test
+    PRIVATE
+        my_agent_ui_clock
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    stream_rate_test
+    TEST_PREFIX "stream_rate."
+)
+
+# TUI terminal session and painter are separate targets so the dependency graph
+# makes the terminal/rendering boundary explicit.
 add_library(
-    my_agent_ui_terminal
-    src/ui/terminal.cpp
+    my_agent_ui_terminal_session
+    src/ui/terminal_session.cpp
 )
 
 target_include_directories(
-    my_agent_ui_terminal
+    my_agent_ui_terminal_session
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
 target_compile_features(
-    my_agent_ui_terminal
+    my_agent_ui_terminal_session
+    PUBLIC cxx_std_26
+)
+
+add_library(
+    my_agent_ui_transcript_viewport
+    src/ui/transcript_viewport.cpp
+)
+
+target_include_directories(
+    my_agent_ui_transcript_viewport
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_ui_transcript_viewport
     PUBLIC cxx_std_26
 )
 
 target_link_libraries(
-    my_agent_ui_terminal
+    my_agent_ui_transcript_viewport
     PUBLIC
-        my_agent_ui_maya
+        maya
+)
+
+add_executable(
+    transcript_viewport_test
+    tests/transcript_viewport_test.cpp
+)
+
+target_link_libraries(
+    transcript_viewport_test
+    PRIVATE
+        my_agent_ui_transcript_viewport
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    transcript_viewport_test
+    TEST_PREFIX "transcript_viewport."
+)
+
+add_library(
+    my_agent_ui_painter
+    src/ui/painter.cpp
+)
+
+target_include_directories(
+    my_agent_ui_painter
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_features(
+    my_agent_ui_painter
+    PUBLIC cxx_std_26
+)
+
+target_link_libraries(
+    my_agent_ui_painter
+    PUBLIC
         my_agent_ui_screen
+        my_agent_ui_transcript_viewport
 )
 
 add_executable(
@@ -1150,7 +1337,8 @@ add_executable(
 target_link_libraries(
     terminal_test
     PRIVATE
-        my_agent_ui_terminal
+        my_agent_ui_painter
+        my_agent_ui_terminal_session
         my_agent_virtual_terminal
         GTest::gtest_main
 )
@@ -1158,6 +1346,40 @@ target_link_libraries(
 gtest_discover_tests(
     terminal_test
     TEST_PREFIX "terminal."
+)
+
+add_executable(
+    terminal_session_test
+    tests/terminal_session_test.cpp
+)
+
+target_link_libraries(
+    terminal_session_test
+    PRIVATE
+        my_agent_ui_terminal_session
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    terminal_session_test
+    TEST_PREFIX "terminal_session."
+)
+
+add_executable(
+    painter_test
+    tests/painter_test.cpp
+)
+
+target_link_libraries(
+    painter_test
+    PRIVATE
+        my_agent_ui_painter
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    painter_test
+    TEST_PREFIX "painter."
 )
 
 # 检索质量基准：已知答案合成（tf×idf top-4 拼查询，gold = 该块自身），
@@ -1175,6 +1397,34 @@ target_link_libraries(
         my_agent_rag
         my_agent_http
         nlohmann_json::nlohmann_json
+)
+
+add_test(
+    NAME rag_bench.judgments_reports_hit_at_one
+    COMMAND ${CMAKE_COMMAND}
+        -DRAG_BENCH=$<TARGET_FILE:rag_bench>
+        -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rag_bench_judgments
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/rag_bench_judgments_test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/rag_bench_judgments_test.cmake
+)
+
+set_tests_properties(
+    rag_bench.judgments_reports_hit_at_one
+    PROPERTIES TIMEOUT 15
+)
+
+add_test(
+    NAME rag_bench.judgments_reports_each_case
+    COMMAND ${CMAKE_COMMAND}
+        -DRAG_BENCH=$<TARGET_FILE:rag_bench>
+        -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rag_bench_case_report
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/rag_bench_case_report_test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/rag_bench_case_report_test.cmake
+)
+
+set_tests_properties(
+    rag_bench.judgments_reports_each_case
+    PROPERTIES TIMEOUT 15
 )
 
 # 阶段一演示终点：最小 REPL。只碰 dispatch / run_until_quiescent / model
@@ -1205,6 +1455,16 @@ target_link_libraries(
     PRIVATE
         maya
         GTest::gtest_main
+)
+
+# Architectural boundary: the project owns its AsyncHost/event loop and only
+# consumes Maya's renderer/core seams. Keep this as a normal CTest entry so a
+# new direct app/umbrella/run dependency fails with the offending path.
+add_test(
+    NAME maya.boundary
+    COMMAND ${CMAKE_COMMAND}
+        -DPROJECT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/maya_boundary.cmake
 )
 
 gtest_discover_tests(

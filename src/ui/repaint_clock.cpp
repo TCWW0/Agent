@@ -1,6 +1,7 @@
 #include "my_agent/ui/repaint_clock.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 namespace my_agent::ui {
 
@@ -11,26 +12,56 @@ RepaintClock::RepaintClock(int frames_per_second)
 {
 }
 
-bool RepaintClock::should_paint(Clock::time_point now)
+void RepaintClock::request_frame(Clock::time_point now) noexcept
 {
-    if (last_paint_ && now - *last_paint_ < frame_budget_) {
-        pending_ = true;  // 记住这次，由 time_until_next_paint 报出补画时机
+    request_frame_after(now, std::chrono::milliseconds{0});
+}
+
+void RepaintClock::request_frame_after(
+    Clock::time_point now,
+    std::chrono::milliseconds delay
+) noexcept
+{
+    if (delay < std::chrono::milliseconds{0}) {
+        delay = std::chrono::milliseconds{0};
+    }
+
+    const auto earliest_allowed = last_paint_
+        ? std::max(now, *last_paint_ + frame_budget_)
+        : now;
+    const auto requested_deadline = now + delay;
+    const auto deadline = std::max(earliest_allowed, requested_deadline);
+
+    if (!next_deadline_ || deadline < *next_deadline_) {
+        next_deadline_ = deadline;
+    }
+}
+
+bool RepaintClock::should_paint(Clock::time_point now) noexcept
+{
+    if (!next_deadline_) {
         return false;
     }
+    if (now < *next_deadline_) {
+        return false;
+    }
+
     last_paint_ = now;
-    pending_ = false;
+    next_deadline_.reset();
     return true;
 }
 
-std::chrono::milliseconds RepaintClock::time_until_next_paint(Clock::time_point now) const
+std::chrono::milliseconds RepaintClock::time_until_next_paint(
+    Clock::time_point now
+) const noexcept
 {
-    if (!pending_ || !last_paint_) {
+    if (!next_deadline_) {
         return std::chrono::milliseconds{-1};  // 无事可做：无限等，让出 CPU
     }
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_paint_);
-    // 已经过了窗口就返回 0：立刻补画，而不是负数（poll 会当成无限等）。
-    return std::max(std::chrono::milliseconds{0}, frame_budget_ - elapsed);
+    if (now >= *next_deadline_) {
+        return std::chrono::milliseconds{0};
+    }
+    return std::chrono::ceil<std::chrono::milliseconds>(*next_deadline_ - now);
 }
 
 }  // namespace my_agent::ui

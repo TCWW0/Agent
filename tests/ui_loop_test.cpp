@@ -1,14 +1,17 @@
 #include "my_agent/ui/ui_loop.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 #include "virtual_terminal.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -42,9 +45,50 @@ std::string decoded_screen(std::string_view bytes, int columns, int rows)
 }
 
 using my_agent::ui::apply_key;
+using my_agent::ui::apply_paste;
 using my_agent::ui::Key;
 using my_agent::ui::KeyOutcome;
 using my_agent::ui::UiState;
+
+std::shared_ptr<const my_agent::tool::ToolRuntime> read_tool_runtime(my_agent::tool::ToolHandler handler)
+{
+    return std::make_shared<const my_agent::tool::ToolRuntime>(
+        std::vector<my_agent::tool::RegisteredTool>{
+            my_agent::tool::RegisteredTool{
+                .descriptor = my_agent::tool::ToolDescriptor{
+                    .name = my_agent::tool::ToolName{.value = "read"},
+                    .description = "read a file",
+                    .input_schema = nlohmann::json{
+                        {"type", "object"},
+                        {"properties", nlohmann::json{
+                            {"path", nlohmann::json{{"type", "string"}}},
+                        }},
+                    },
+                    .effects = my_agent::tool::EffectSet{
+                        my_agent::tool::Effect::ReadFs,
+                    },
+                },
+                .handler = std::move(handler),
+            },
+        });
+}
+
+std::shared_ptr<const my_agent::tool::ToolRuntime> empty_tool_runtime()
+{
+    return std::make_shared<const my_agent::tool::ToolRuntime>(
+        std::vector<my_agent::tool::RegisteredTool>{});
+}
+
+class TestHost : public my_agent::AsyncHost {
+public:
+    explicit TestHost(my_agent::StreamEffect stream)
+        : my_agent::AsyncHost(std::move(stream), empty_tool_runtime()) {}
+
+    TestHost(my_agent::StreamEffect stream,
+             std::shared_ptr<const my_agent::tool::ToolRuntime> runtime)
+        : my_agent::AsyncHost(
+              std::move(stream), std::move(runtime)) {}
+};
 
 // 场景：Idle 时敲字然后回车。
 // 领域语义：输入行的编辑完全属于前端 —— 只有回车才产生一条领域事件。这是
@@ -69,6 +113,28 @@ TEST(UiLoopTest, OnlyEnterCrossesIntoTheDomainAndItClearsTheInputLine)
     EXPECT_TRUE(ui.input.empty()) << "回车后必须清空，否则下一句带着残留";
 }
 
+TEST(UiLoopTest, PasteStaysInComposerUntilTheUserSubmits)
+{
+    UiState ui;
+    my_agent::Model model;
+
+    const KeyOutcome pasted = apply_paste(
+        "first line\nsecond line\r\nthird line", ui, model);
+    EXPECT_FALSE(pasted.msg.has_value());
+    ASSERT_EQ(1u, ui.pastes.size());
+    EXPECT_EQ("first line\nsecond line\nthird line", ui.pastes.front().body);
+    EXPECT_EQ(std::string::npos, ui.input.find("first line"));
+
+    const KeyOutcome submitted = apply_key(
+        Key{.kind = Key::Kind::Enter}, ui, model);
+    ASSERT_TRUE(submitted.msg.has_value());
+    const auto* submit = std::get_if<my_agent::Submit>(&*submitted.msg);
+    ASSERT_NE(nullptr, submit);
+    EXPECT_EQ("first line\nsecond line\nthird line", submit->text);
+    EXPECT_TRUE(ui.input.empty());
+    EXPECT_TRUE(ui.pastes.empty());
+}
+
 // 场景：AwaitingPermission 时按 y / n。
 // 领域语义：同一个按键在不同 phase 下含义不同 —— 这正是 apply_key 需要看 model 的
 // 唯一理由。审批期间 'y' 是批准而不是往输入行插入字母 'y'。批准/拒绝必须带上
@@ -77,8 +143,35 @@ TEST(UiLoopTest, OnlyEnterCrossesIntoTheDomainAndItClearsTheInputLine)
 TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
 {
     my_agent::Model model;
-    model.phase = my_agent::AwaitingPermission{};
-    model.pending_permission = my_agent::PendingPermission{.id = "call_7f3a"};
+    model.thread.messages.push_back({
+        .role = my_agent::Role::Assistant,
+        .text = "",
+        .tool_calls = {{
+            .id = "call_7f3a",
+            .name = "custom_writer",
+            .args = nlohmann::json::object(),
+            .status = my_agent::ToolCall::Pending{
+                .binding = my_agent::tool::ToolBinding{
+                    .ref = my_agent::tool::ToolRef{7},
+                    .effects = {my_agent::tool::Effect::WriteFs},
+                }},
+            .turn_id = my_agent::TurnId{3},
+            .tool_exec_id = my_agent::ToolExecId{9},
+        }},
+        .id = my_agent::MessageId{11},
+        .turn_id = my_agent::TurnId{3},
+    });
+    model.phase = my_agent::AwaitingPermission{
+        .turn_id = my_agent::TurnId{3},
+        .tool_exec_id = my_agent::ToolExecId{9},
+        .id = "call_7f3a",
+        .assistant_message_id = my_agent::MessageId{11},
+    };
+    model.pending_permission = my_agent::PendingPermission{
+        .id = "call_7f3a",
+        .turn_id = my_agent::TurnId{3},
+        .tool_exec_id = my_agent::ToolExecId{9},
+    };
 
     UiState approve_ui;
     const KeyOutcome approved =
@@ -86,6 +179,10 @@ TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
     ASSERT_TRUE(approved.msg.has_value());
     ASSERT_TRUE(std::holds_alternative<my_agent::PermissionApprove>(*approved.msg));
     EXPECT_EQ("call_7f3a", std::get<my_agent::PermissionApprove>(*approved.msg).id);
+    EXPECT_EQ(my_agent::TurnId{3},
+              std::get<my_agent::PermissionApprove>(*approved.msg).turn_id);
+    EXPECT_EQ(my_agent::ToolExecId{9},
+              std::get<my_agent::PermissionApprove>(*approved.msg).tool_exec_id);
     EXPECT_TRUE(approve_ui.input.empty()) << "审批期间的按键不该进输入行";
 
     UiState reject_ui;
@@ -95,6 +192,15 @@ TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
     ASSERT_TRUE(std::holds_alternative<my_agent::PermissionReject>(*rejected.msg));
     EXPECT_EQ("call_7f3a", std::get<my_agent::PermissionReject>(*rejected.msg).id);
 
+    model.pending_permission->tool_exec_id = my_agent::ToolExecId{10};
+    UiState invalid_ui;
+    EXPECT_FALSE(apply_key(
+        Key{.kind = Key::Kind::Text, .text = "y"}, invalid_ui, model).msg.has_value());
+    const KeyOutcome cancel = apply_key(
+        Key{.kind = Key::Kind::Interrupt}, invalid_ui, model);
+    ASSERT_TRUE(cancel.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::CancelActive>(*cancel.msg));
+
     // Idle 时同一个键仍然是普通文本。
     UiState idle_ui;
     const my_agent::Model idle;
@@ -102,6 +208,61 @@ TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
         apply_key(Key{.kind = Key::Kind::Text, .text = "y"}, idle_ui, idle);
     EXPECT_FALSE(typed.msg.has_value());
     EXPECT_EQ("y", idle_ui.input);
+}
+
+TEST(UiLoopTest, InvalidToolActivityAllowsOnlyCancellationAndTranscriptNavigation)
+{
+    my_agent::Model model;
+    model.phase = my_agent::ExecutingTool{
+        .call = my_agent::ToolCallRef{
+            .assistant_message_id = my_agent::MessageId{11},
+            .tool_exec_id = my_agent::ToolExecId{9},
+        },
+    };
+    UiState ui;
+    ui.input = "keep";
+
+    EXPECT_FALSE(apply_key(
+        Key{.kind = Key::Kind::Text, .text = "x"}, ui, model).msg.has_value());
+    EXPECT_EQ("keep", ui.input);
+    EXPECT_TRUE(apply_key(Key{.kind = Key::Kind::PageUp}, ui, model)
+                    .transcript_navigation.has_value());
+    EXPECT_FALSE(apply_paste("not accepted", ui, model).msg.has_value());
+    EXPECT_TRUE(ui.pastes.empty());
+    EXPECT_EQ("keep", ui.input);
+
+    const KeyOutcome cancel =
+        apply_key(Key{.kind = Key::Kind::Interrupt}, ui, model);
+    ASSERT_TRUE(cancel.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::CancelActive>(*cancel.msg));
+}
+
+TEST(UiLoopTest, EmptyInterruptCancelsAnActiveTurn)
+{
+    UiState ui;
+    my_agent::Model model;
+    model.phase = my_agent::Streaming{.ref = my_agent::StreamRef{.turn_id = my_agent::TurnId{1}, .stream_id = my_agent::StreamId{2}}, .target_message_id = my_agent::MessageId{3}};
+
+    const KeyOutcome outcome =
+        apply_key(Key{.kind = Key::Kind::Interrupt}, ui, model);
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::CancelActive>(*outcome.msg));
+    EXPECT_TRUE(ui.input.empty());
+}
+
+TEST(UiLoopTest, EmptyInterruptCancelsCompaction)
+{
+    UiState ui;
+    my_agent::Model model;
+    model.phase = my_agent::Compacting{};
+
+    const KeyOutcome outcome =
+        apply_key(Key{.kind = Key::Kind::Interrupt}, ui, model);
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::CancelActive>(*outcome.msg));
+    EXPECT_TRUE(ui.input.empty());
 }
 
 // 场景：删掉一个汉字。
@@ -157,6 +318,89 @@ TEST(UiLoopTest, CursorKeysEditTheInputWithoutCrossingIntoTheDomain)
     EXPECT_EQ(5u, ui.cursor);
 }
 
+TEST(UiLoopTest, TranscriptNavigationKeysProduceUiIntentsNotDomainMessages)
+{
+    UiState ui{.input = "draft", .cursor = 2};
+    const my_agent::Model model;
+
+    const KeyOutcome page_up = apply_key(
+        Key{.kind = Key::Kind::PageUp}, ui, model
+    );
+    ASSERT_TRUE(page_up.transcript_navigation.has_value());
+    EXPECT_EQ(
+        my_agent::ui::TranscriptNavigation::PageUp,
+        *page_up.transcript_navigation);
+    EXPECT_FALSE(page_up.msg.has_value());
+    EXPECT_EQ("draft", ui.input);
+    EXPECT_EQ(2u, ui.cursor);
+
+    const KeyOutcome page_down = apply_key(
+        Key{.kind = Key::Kind::PageDown}, ui, model
+    );
+    ASSERT_TRUE(page_down.transcript_navigation.has_value());
+    EXPECT_EQ(
+        my_agent::ui::TranscriptNavigation::PageDown,
+        *page_down.transcript_navigation);
+    EXPECT_FALSE(page_down.msg.has_value());
+
+    const KeyOutcome to_top = apply_key(
+        Key{.kind = Key::Kind::ControlHome}, ui, model
+    );
+    ASSERT_TRUE(to_top.transcript_navigation.has_value());
+    EXPECT_EQ(
+        my_agent::ui::TranscriptNavigation::Top,
+        *to_top.transcript_navigation);
+    EXPECT_FALSE(to_top.msg.has_value());
+
+    const KeyOutcome to_bottom = apply_key(
+        Key{.kind = Key::Kind::ControlEnd}, ui, model
+    );
+    ASSERT_TRUE(to_bottom.transcript_navigation.has_value());
+    EXPECT_EQ(
+        my_agent::ui::TranscriptNavigation::Bottom,
+        *to_bottom.transcript_navigation);
+    EXPECT_FALSE(to_bottom.msg.has_value());
+}
+
+TEST(UiLoopTest, NonEmptySubmitRequestsBottomBeforeDispatch)
+{
+    UiState ui{.input = "send this", .cursor = 4};
+    const my_agent::Model model;
+
+    const KeyOutcome outcome = apply_key(
+        Key{.kind = Key::Kind::Enter}, ui, model
+    );
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    ASSERT_TRUE(outcome.transcript_navigation.has_value());
+    EXPECT_EQ(
+        my_agent::ui::TranscriptNavigation::Bottom,
+        *outcome.transcript_navigation);
+}
+
+TEST(UiLoopTest, ExactCompactCommandBecomesACompactionRequest)
+{
+    UiState ui{.input = "/compact", .cursor = 8};
+    const my_agent::Model model;
+
+    const KeyOutcome outcome = apply_key(
+        Key{.kind = Key::Kind::Enter}, ui, model);
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::RequestCompaction>(
+        *outcome.msg));
+    EXPECT_FALSE(std::holds_alternative<my_agent::Submit>(*outcome.msg));
+    EXPECT_TRUE(ui.input.empty());
+
+    UiState regular{.input = "/compact now", .cursor = 12};
+    const KeyOutcome ordinary = apply_key(
+        Key{.kind = Key::Kind::Enter}, regular, model);
+    ASSERT_TRUE(ordinary.msg.has_value());
+    const auto* submit = std::get_if<my_agent::Submit>(&*ordinary.msg);
+    ASSERT_NE(nullptr, submit);
+    EXPECT_EQ("/compact now", submit->text);
+}
+
 // 场景：空输入行上按回车。
 // 领域语义：不该发一条空的 Submit —— 那会让模型收到一条空用户消息，浪费一次
 // 往返，而且有些 provider 会直接报错。回车在空行上应该什么都不做。
@@ -169,6 +413,51 @@ TEST(UiLoopTest, EnterOnAnEmptyLineDoesNotSubmit)
     const KeyOutcome outcome = apply_key(Key{.kind = Key::Kind::Enter}, ui, model);
 
     EXPECT_FALSE(outcome.msg.has_value());
+}
+
+TEST(UiLoopTest, CtrlRResumesAQueuedBlockedSession)
+{
+    UiState ui;
+    my_agent::Model model;
+    model.phase = my_agent::Blocked{
+        .reason = my_agent::BlockReason::ContextLimit,
+        .message = "request exceeds the available context budget",
+    };
+    model.queued_messages.push_back(my_agent::QueuedMessage{
+        .turn_id = my_agent::TurnId{1},
+        .message_id = my_agent::MessageId{1},
+        .text = "waiting prompt",
+    });
+
+    const KeyOutcome outcome = apply_key(
+        Key{.kind = Key::Kind::ResumeQueue}, ui, model);
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::ResumeQueue>(*outcome.msg));
+    EXPECT_TRUE(ui.input.empty());
+}
+
+TEST(UiLoopTest, CtrlXClearsQueuedPromptsWithoutTouchingTheDraft)
+{
+    UiState ui{.input = "draft", .cursor = 3};
+    my_agent::Model model;
+    model.queued_messages.push_back(my_agent::QueuedMessage{
+        .turn_id = my_agent::TurnId{1},
+        .message_id = my_agent::MessageId{1},
+        .text = "waiting prompt",
+    });
+
+    const KeyOutcome outcome = apply_key(
+        Key{.kind = Key::Kind::ClearQueue}, ui, model);
+
+    ASSERT_TRUE(outcome.msg.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::ClearQueue>(*outcome.msg));
+    EXPECT_EQ("draft", ui.input);
+    EXPECT_EQ(3u, ui.cursor);
+
+    model.queued_messages.clear();
+    EXPECT_FALSE(apply_key(
+        Key{.kind = Key::Kind::ClearQueue}, ui, model).msg.has_value());
 }
 
 TEST(UiLoopTest, CtrlCAndCtrlUClearTheDraftWithoutSubmittingOrQuitting)
@@ -222,16 +511,17 @@ TEST(UiLoopTest, DeclinesToRunWithoutATtySoTheCallerCanFallBack)
     const int devnull = ::open("/dev/null", O_RDWR);
     ASSERT_LE(0, devnull);
 
-    my_agent::ui::TerminalDriver terminal{devnull, devnull};
-    my_agent::AsyncHost host{[](my_agent::Request, my_agent::EventSink) {}};
+    my_agent::ui::TerminalSession terminal{devnull, devnull};
+    my_agent::ui::Painter painter;
+    TestHost host{[](my_agent::Request, my_agent::ProviderEventSink) {}};
 
-    EXPECT_FALSE(my_agent::ui::run_ui(host, terminal));
+    EXPECT_FALSE(my_agent::ui::run_ui(host, terminal, painter));
 
     ::close(devnull);
 }
 
-// issue #26 红 4：真实事件循环必须画语义 Screen，而不是继续把 Model 压成旧 Frame。
-// 一条 tracer bullet 同时穿过 run_ui → project_screen → TerminalDriver → pty：
+// issue #26 红 4：真实事件循环绘制语义 Screen。
+// 一条 tracer bullet 同时穿过 run_ui → project_screen → Painter → pty：
 // 初始帧先看到新 Composer 的占位文案；提交后再看到 Conversation 的 speaker chrome
 // 和助手正文。旧路径虽然也能吐出消息文本，却没有 "type a message"、"you"、
 // "agent" 这些 Maya widget 拥有的语义外观，因此不能靠正文碰巧出现蒙混过关。
@@ -246,17 +536,18 @@ TEST(UiLoopTest, RunsTheSemanticTranscriptAndDockOnARealTerminal)
         GTEST_SKIP() << "openpty unavailable in this environment";
     }
 
-    my_agent::AsyncHost host{[kAssistant](
-        my_agent::Request, my_agent::EventSink sink) {
-        sink(my_agent::Msg{my_agent::StreamTextDelta{
+    TestHost host{[kAssistant](
+        my_agent::Request, my_agent::ProviderEventSink sink) {
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
             .text = std::string{kAssistant},
         }});
-        sink(my_agent::Msg{my_agent::StreamFinished{}});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
     }};
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     std::string seen;
@@ -308,6 +599,774 @@ TEST(UiLoopTest, RunsTheSemanticTranscriptAndDockOnARealTerminal)
     stop();
 }
 
+TEST(UiLoopTest, RoutesBracketedPasteAsOneComposerSubmission)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::atomic_bool called{false};
+    std::string submitted;
+    TestHost host{[&](my_agent::Request request,
+                                 my_agent::ProviderEventSink sink) {
+        for (const my_agent::Message& message : request.messages) {
+            if (message.role == my_agent::Role::User) {
+                submitted = message.text;
+            }
+        }
+        called.store(true, std::memory_order_release);
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+            .text = "PASTE_ACCEPTED_7F3A",
+        }});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+    }};
+    host.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{.policy = my_agent::RequestPolicy{my_agent::ContextManagementConfig{
+            .configured_limit = 32768,
+            .safety_margin = 64,
+            .normal_output_ratio = 0.0078125,
+            .normal_output_ceiling = 256,
+        }, {}, "model-a"}}});
+    host.set_system_prompt_provider([] {
+        return std::string{"dynamic startup prompt"};
+    });
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto read_until = [&seen, primary](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+            if (::poll(&probe, 1, 200) > 0) {
+                char buffer[4096];
+                const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+                if (count > 0) {
+                    seen.append(buffer, static_cast<std::size_t>(count));
+                }
+            }
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("type a message")) {
+        ADD_FAILURE() << "initial frame did not contain the semantic composer";
+        stop();
+        return;
+    }
+
+    const std::string pasted_body =
+        "first line\nsecond line\r\nthird line\n"
+        + std::string(6000, 'x');
+    const std::string pasted =
+        "\x1b[200~" + pasted_body + "\x1b[201~";
+    ASSERT_EQ(static_cast<ssize_t>(pasted.size()),
+              ::write(primary, pasted.data(), pasted.size()));
+    ASSERT_TRUE(read_until("Pasted text"));
+    EXPECT_FALSE(called.load(std::memory_order_acquire));
+
+    const char enter = '\r';
+    ASSERT_EQ(1, ::write(primary, &enter, 1));
+    ASSERT_TRUE(read_until("PASTE_ACCEPTED_7F3A"));
+    ASSERT_TRUE(called.load(std::memory_order_acquire));
+    EXPECT_EQ("first line\nsecond line\nthird line\n"
+              + std::string(6000, 'x'), submitted);
+
+    stop();
+}
+
+TEST(UiLoopTest, ShowsQueuedPreviewThenPromotesItWithoutDuplication)
+{
+    std::atomic<bool> release_first{false};
+    std::atomic_size_t stream_calls{0};
+
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    TestHost host{
+        [&release_first, &stream_calls](my_agent::Request,
+                                         my_agent::ProviderEventSink sink) {
+            if (stream_calls.fetch_add(1) == 0) {
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                    .text = "FIRST_OUTPUT_7F3A",
+                }});
+                while (!release_first.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+                }
+                sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+                return;
+            }
+
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                .text = "SECOND_OUTPUT_9C2E",
+            }});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        }};
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto read_chunk = [&] {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    };
+    const auto screen = [&] {
+        return decoded_screen(seen, 80, 24);
+    };
+    const auto read_until = [&read_chunk, &seen](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto read_screen_until = [&read_chunk, &screen](
+        std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && screen().find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return screen().find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        release_first.store(true, std::memory_order_release);
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("\x1b[?1049h")) {
+        ADD_FAILURE() << "driver did not enter the alternate screen";
+        stop();
+        return;
+    }
+
+    ASSERT_EQ(6, ::write(primary, "first\r", 6));
+    ASSERT_TRUE(read_until("FIRST_OUTPUT_7F3A"));
+
+    const std::string queued_paste =
+        "\x1b[200~queued prompt\x1b[201~\r";
+    ASSERT_EQ(static_cast<ssize_t>(queued_paste.size()),
+              ::write(primary, queued_paste.data(), queued_paste.size()));
+    ASSERT_TRUE(read_screen_until("queued 1 / 1"));
+    EXPECT_NE(std::string::npos, screen().find("queued prompt"));
+
+    release_first.store(true, std::memory_order_release);
+    ASSERT_TRUE(read_until("SECOND_OUTPUT_9C2E"));
+    ASSERT_TRUE(read_screen_until("SECOND_OUTPUT_9C2E"));
+    const std::string final_screen = screen();
+    EXPECT_EQ(std::string::npos, final_screen.find("queued 1 / 1"));
+    const std::size_t queued_start = final_screen.find("queued prompt");
+    ASSERT_NE(std::string::npos, queued_start);
+    EXPECT_EQ(
+        std::string::npos,
+        final_screen.find("queued prompt", queued_start + 1));
+
+    stop();
+}
+
+TEST(UiLoopTest, OversizedPasteShowsContextLimitAndCtrlXClearsQueue)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::atomic_size_t stream_calls{0};
+    TestHost host{[&stream_calls](
+        my_agent::Request, my_agent::ProviderEventSink) {
+        ++stream_calls;
+    }};
+    host.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{.policy = my_agent::RequestPolicy{my_agent::ContextManagementConfig{
+            .configured_limit = 512,
+            .safety_margin = 32,
+            .normal_output_ratio = 0.125,
+            .normal_output_ceiling = 64,
+            .compaction_output_ratio = 0.0625,
+            .compaction_output_ceiling = 32,
+        }, {}, "test-model"}}});
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto read_chunk = [&] {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    };
+    const auto screen = [&] {
+        return decoded_screen(seen, 80, 24);
+    };
+    const auto read_screen_until = [&read_chunk, &screen](
+        std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && screen().find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return screen().find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_screen_until("Ready")) {
+        ADD_FAILURE() << "driver did not paint its initial frame";
+        stop();
+        return;
+    }
+
+    const std::string paste = "\x1b[200~" + std::string(1000, 'x')
+        + "\x1b[201~\r";
+    if (::write(primary, paste.data(), paste.size())
+        != static_cast<ssize_t>(paste.size())) {
+        ADD_FAILURE() << "failed to write oversized bracketed paste";
+        stop();
+        return;
+    }
+    if (!read_screen_until("Ctx limit")) {
+        ADD_FAILURE() << "context-limit phase was not visible\n" << screen();
+        stop();
+        return;
+    }
+    EXPECT_NE(std::string::npos, screen().find("Ctrl-X clear"));
+    EXPECT_EQ(std::size_t{0}, stream_calls.load());
+
+    const char clear_queue = 0x18;
+    if (::write(primary, &clear_queue, 1) != 1) {
+        ADD_FAILURE() << "failed to write Ctrl-X";
+        stop();
+        return;
+    }
+    if (!read_screen_until("Ready")) {
+        ADD_FAILURE() << "cleared context-limit queue did not return to Ready\n"
+                      << screen();
+        stop();
+        return;
+    }
+    EXPECT_EQ(std::string::npos, screen().find("queued 1 / 1"));
+
+    stop();
+    EXPECT_EQ(std::size_t{0}, stream_calls.load());
+    EXPECT_TRUE(host.model().queued_messages.empty());
+    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(host.model().phase));
+}
+
+TEST(UiLoopTest, RoutesPageUpBytesToTheTranscriptViewport)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::string transcript;
+    for (int index = 0; index < 90; ++index) {
+        transcript += "SCROLL_ROW_" + std::to_string(index) + "\n";
+    }
+    TestHost host{[transcript](my_agent::Request, my_agent::ProviderEventSink sink) {
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = transcript}});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+    }};
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto read_chunk = [&] {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    };
+    const auto read_until = [&read_chunk, &seen](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("\x1b[?1049h")) {
+        ADD_FAILURE() << "driver did not enter the alternate screen";
+        stop();
+        return;
+    }
+
+    const std::string typed = "scroll\r";
+    ASSERT_EQ(static_cast<ssize_t>(typed.size()),
+              ::write(primary, typed.data(), typed.size()));
+    ASSERT_TRUE(read_until("SCROLL_ROW_89"));
+    EXPECT_EQ(
+        std::string::npos,
+        decoded_screen(seen, 80, 24).find("SCROLL_ROW_0"));
+
+    std::string page_ups;
+    for (int count = 0; count < 40; ++count) {
+        page_ups += "\x1b[5~";
+    }
+    ASSERT_EQ(static_cast<ssize_t>(page_ups.size()),
+              ::write(primary, page_ups.data(), page_ups.size()));
+    const auto page_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < page_deadline
+           && decoded_screen(seen, 80, 24).find("SCROLL_ROW_0")
+               == std::string::npos) {
+        read_chunk();
+    }
+    EXPECT_NE(
+        std::string::npos,
+        decoded_screen(seen, 80, 24).find("SCROLL_ROW_0"));
+
+    stop();
+}
+
+TEST(UiLoopTest, ShowsUnseenTranscriptOutputWithoutMovingAFrozenViewport)
+{
+    constexpr std::string_view kTail = "S3_NEW_OUTPUT_TAIL_7F3A";
+
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::string transcript;
+    for (int index = 0; index < 90; ++index) {
+        transcript += "S3_ROW_" + std::to_string(index) + "\n";
+    }
+    std::atomic<bool> release_tail{false};
+    TestHost host{
+        [&transcript, &release_tail, kTail](
+            my_agent::Request, my_agent::ProviderEventSink sink) {
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = transcript}});
+            while (!release_tail.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                .text = std::string{kTail},
+            }});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        }};
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto read_chunk = [&] {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    };
+    const auto read_until = [&read_chunk, &seen](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto screen = [&] {
+        return decoded_screen(seen, 80, 24);
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("\x1b[?1049h")) {
+        ADD_FAILURE() << "driver did not enter the alternate screen";
+        stop();
+        return;
+    }
+
+    const std::string typed = "s3\r";
+    ASSERT_EQ(static_cast<ssize_t>(typed.size()),
+              ::write(primary, typed.data(), typed.size()));
+    ASSERT_TRUE(read_until("S3_ROW_89"));
+
+    std::string page_ups;
+    for (int count = 0; count < 40; ++count) {
+        page_ups += "\x1b[5~";
+    }
+    ASSERT_EQ(static_cast<ssize_t>(page_ups.size()),
+              ::write(primary, page_ups.data(), page_ups.size()));
+    const auto top_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < top_deadline
+           && screen().find("S3_ROW_0") == std::string::npos) {
+        read_chunk();
+    }
+    const std::string frozen = screen();
+    ASSERT_NE(std::string::npos, frozen.find("S3_ROW_0"));
+    EXPECT_NE(std::string::npos, frozen.find("Ctrl+End"));
+    EXPECT_EQ(std::string::npos, frozen.find("new output"));
+
+    release_tail.store(true, std::memory_order_release);
+    const auto output_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < output_deadline
+           && screen().find("new output") == std::string::npos) {
+        read_chunk();
+    }
+    const std::string unseen = screen();
+    EXPECT_NE(std::string::npos, unseen.find("S3_ROW_0"));
+    EXPECT_NE(std::string::npos, unseen.find("new output"));
+    EXPECT_NE(std::string::npos, unseen.find("End")) << unseen;
+    EXPECT_EQ(std::string::npos, unseen.find(kTail));
+
+    const std::string to_bottom = "\x1b[1;5F";
+    ASSERT_EQ(static_cast<ssize_t>(to_bottom.size()),
+              ::write(primary, to_bottom.data(), to_bottom.size()));
+    const auto bottom_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < bottom_deadline
+           && screen().find(kTail) == std::string::npos) {
+        read_chunk();
+    }
+    const std::string followed = screen();
+    EXPECT_NE(std::string::npos, followed.find(kTail));
+    EXPECT_EQ(std::string::npos, followed.find("new output"));
+
+    stop();
+}
+
+TEST(UiLoopTest, RoutesVerticalWheelOnlyWhenItsCoordinateHitsTheTranscript)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::string transcript;
+    for (int index = 0; index < 90; ++index) {
+        transcript += "WHEEL_ROW_" + std::to_string(index) + "\n";
+    }
+    TestHost host{[transcript](my_agent::Request, my_agent::ProviderEventSink sink) {
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = transcript}});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+    }};
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(
+            host, terminal, painter, {},
+            my_agent::ui::UiConfig{.mouse_scroll_rows = 3}));
+    }};
+
+    std::string seen;
+    const auto read_chunk = [&] {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    };
+    const auto read_until = [&read_chunk, &seen](std::string_view needle) {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() < deadline
+               && seen.find(needle) == std::string::npos) {
+            read_chunk();
+        }
+        return seen.find(needle) != std::string::npos;
+    };
+    const auto stop = [&] {
+        const char eof = 0x04;
+        static_cast<void>(::write(primary, &eof, 1));
+        ui_thread.join();
+        host.shutdown();
+        ::close(replica);
+        ::close(primary);
+    };
+
+    if (!read_until("\x1b[?1049h")) {
+        ADD_FAILURE() << "driver did not enter the alternate screen";
+        stop();
+        return;
+    }
+
+    const std::string typed = "wheel\r";
+    ASSERT_EQ(static_cast<ssize_t>(typed.size()),
+              ::write(primary, typed.data(), typed.size()));
+    ASSERT_TRUE(read_until("WHEEL_ROW_89"));
+    const std::string at_bottom = decoded_screen(seen, 80, 24);
+    ASSERT_EQ(std::string::npos, at_bottom.find("WHEEL_ROW_0"));
+
+    const std::string wheel_up = "\x1b[<64;10;1M";
+    ASSERT_EQ(static_cast<ssize_t>(wheel_up.size()),
+              ::write(primary, wheel_up.data(), wheel_up.size()));
+    const auto inside_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < inside_deadline
+           && decoded_screen(seen, 80, 24) == at_bottom) {
+        read_chunk();
+    }
+    const std::string after_inside = decoded_screen(seen, 80, 24);
+    EXPECT_NE(at_bottom, after_inside)
+        << "滚轮命中 transcript 后必须改变可见滚动几何";
+
+    const std::string outside_wheel = "\x1b[<64;10;24M";
+    ASSERT_EQ(static_cast<ssize_t>(outside_wheel.size()),
+              ::write(primary, outside_wheel.data(), outside_wheel.size()));
+    const auto outside_deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds{300};
+    while (std::chrono::steady_clock::now() < outside_deadline) {
+        read_chunk();
+    }
+    EXPECT_EQ(after_inside, decoded_screen(seen, 80, 24))
+        << "滚轮命中 dock/status 区域不得改变 transcript";
+
+    stop();
+}
+
+TEST(UiLoopTest, KeepsThinkingAliveWithoutAnExternalEvent)
+{
+    int primary = -1;
+    int replica = -1;
+    if (::openpty(&primary, &replica, nullptr, nullptr, nullptr) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::atomic<bool> release{false};
+    TestHost host{
+        [&release](my_agent::Request, my_agent::ProviderEventSink) {
+            while (!release.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+        }};
+    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "thinking-test"}});
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto ready_by = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < ready_by
+           && seen.find("\x1b[?1049h") == std::string::npos) {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    }
+    ASSERT_NE(std::string::npos, seen.find("\x1b[?1049h"))
+        << "驱动没能进入全屏";
+
+    // Drain bytes already belonging to the initial paint before measuring the
+    // no-event animation window. Keep a short quiet period so a split pty
+    // write cannot be mistaken for an animation repaint.
+    auto quiet_until = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds{25};
+    while (std::chrono::steady_clock::now() < quiet_until) {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 5) <= 0) {
+            continue;
+        }
+        char buffer[4096];
+        const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+        if (count <= 0) {
+            break;
+        }
+        seen.append(buffer, static_cast<std::size_t>(count));
+        quiet_until = std::chrono::steady_clock::now()
+            + std::chrono::milliseconds{25};
+    }
+
+    const std::size_t initial_bytes = seen.size();
+    const auto animation_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{2};
+    while (std::chrono::steady_clock::now() < animation_deadline
+           && seen.size() == initial_bytes) {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+    }
+
+    EXPECT_GT(seen.size(), initial_bytes)
+        << "Thinking 的 ActivityIndicator 应在没有 token、键盘或 resize 时继续请求重绘";
+
+    release.store(true, std::memory_order_release);
+    const char eof = 0x04;
+    static_cast<void>(::write(primary, &eof, 1));
+    ui_thread.join();
+    host.shutdown();
+
+    ::close(replica);
+    ::close(primary);
+}
+
+TEST(UiLoopTest, ShowsLiveTokenRateWithoutAnExternalEvent)
+{
+    int primary = -1;
+    int replica = -1;
+    winsize initial{
+        .ws_row = 24,
+        .ws_col = 80,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+    if (::openpty(&primary, &replica, nullptr, nullptr, &initial) != 0) {
+        GTEST_SKIP() << "openpty unavailable in this environment";
+    }
+
+    std::atomic<bool> second_delta_sent{false};
+    std::atomic<bool> release{false};
+    TestHost host{
+        [&second_delta_sent, &release](my_agent::Request, my_agent::ProviderEventSink sink) {
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = "ABCD"}});
+            std::this_thread::sleep_for(std::chrono::milliseconds{350});
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                .text = std::string(396, 'x'),
+            }});
+            second_delta_sent.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+        }};
+    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "rate-test"}});
+
+    std::thread ui_thread{[&host, replica] {
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
+    }};
+
+    std::string seen;
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    bool observed_nonzero_rate = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
+        if (::poll(&probe, 1, 200) > 0) {
+            char buffer[4096];
+            const ssize_t count = ::read(primary, buffer, sizeof(buffer));
+            if (count > 0) {
+                seen.append(buffer, static_cast<std::size_t>(count));
+            }
+        }
+        if (second_delta_sent.load(std::memory_order_acquire)) {
+            const std::string screen = decoded_screen(seen, 80, 24);
+            if (screen.find("t/s") != std::string::npos
+                && screen.find("0.0 t/s") == std::string::npos) {
+                observed_nonzero_rate = true;
+                break;
+            }
+        }
+    }
+
+    EXPECT_TRUE(observed_nonzero_rate)
+        << "流式 delta 到达后，状态栏必须在没有外部事件时显示非零实时速率\n"
+        << decoded_screen(seen, 80, 24);
+
+    release.store(true, std::memory_order_release);
+    const char eof = 0x04;
+    static_cast<void>(::write(primary, &eof, 1));
+    ui_thread.join();
+    host.shutdown();
+
+    ::close(replica);
+    ::close(primary);
+}
+
 // 场景：流式 token 在**回合结束之前**就出现在屏幕上。
 // 领域语义：这是整个 issue #10 存在的理由。行式 REPL 实测的缺陷是「敲完回车之后
 // 19 秒死寂，然后整段一次性出现」—— 因为 run_until_quiescent 在 phase 是 Streaming
@@ -328,17 +1387,18 @@ TEST(UiLoopTest, PaintsStreamingTextBeforeTheTurnEnds)
     // 用 release 而不是 sleep 一个固定时长：断言做完才放 worker 走，既保证
     // 「观察发生在回合结束之前」，又不让测试为一个猜的时长白等。
     std::atomic<bool> release{false};
-    my_agent::AsyncHost host{
-        [&release](my_agent::Request, my_agent::EventSink sink) {
-            sink(my_agent::Msg{my_agent::StreamTextDelta{.text = "STREAMED"}});
+    TestHost host{
+        [&release](my_agent::Request, my_agent::ProviderEventSink sink) {
+            sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = "STREAMED"}});
             while (!release.load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{5});
             }
         }};
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     // 必须等驱动进了 raw mode 才能敲键：tcsetattr 用的是 TCSAFLUSH，会丢弃此前
@@ -409,14 +1469,15 @@ TEST(UiLoopTest, PaintsTheFinalChunkEvenThoughNoWakeFollowsTheEndOfTheStream)
     }
 
     // 正常终结的流：发完 delta 立刻 StreamFinished，此后不再有任何唤醒。
-    my_agent::AsyncHost host{[](my_agent::Request, my_agent::EventSink sink) {
-        sink(my_agent::Msg{my_agent::StreamTextDelta{.text = "LASTCHUNK"}});
-        sink(my_agent::Msg{my_agent::StreamFinished{}});
+    TestHost host{[](my_agent::Request, my_agent::ProviderEventSink sink) {
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = "LASTCHUNK"}});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
     }};
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     std::string seen;
@@ -481,14 +1542,15 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
     // 40 个 A：80 列时一行放得下，20 列时必须折成多行。宽度是否被重新读取，
     // 看的就是屏幕上一行到底有多少个 A。
     const std::string wide_text(40, 'A');
-    my_agent::AsyncHost host{[wide_text](my_agent::Request, my_agent::EventSink sink) {
-        sink(my_agent::Msg{my_agent::StreamTextDelta{.text = wide_text}});
-        sink(my_agent::Msg{my_agent::StreamFinished{}});
+    TestHost host{[wide_text](my_agent::Request, my_agent::ProviderEventSink sink) {
+        sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = wide_text}});
+        sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
     }};
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     std::string seen;
@@ -578,10 +1640,10 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
     std::atomic<bool> received_expected_args{false};
     my_agent::StreamEffect fake_stream =
         [&stream_calls, kArgumentSentinel, kContinuationSentinel](
-            my_agent::Request, my_agent::EventSink sink
+            my_agent::Request, my_agent::ProviderEventSink sink
         ) {
             if (stream_calls.fetch_add(1, std::memory_order_acq_rel) == 0) {
-                sink(my_agent::Msg{my_agent::StreamToolCall{
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
                     .id = "pty-approval-call",
                     .name = "read",
                     .args = nlohmann::json{
@@ -589,18 +1651,19 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
                     },
                 }});
             } else {
-                sink(my_agent::Msg{my_agent::StreamTextDelta{
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
                     .text = std::string{kContinuationSentinel},
                 }});
             }
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
         };
-    my_agent::ToolExecEffect fake_tool =
+    my_agent::tool::ToolHandler fake_tool =
         [&received_expected_args, kArgumentSentinel](
-            std::string_view name, const nlohmann::json& args
+            const nlohmann::json& args,
+            const my_agent::tool::ToolExecutionContext& context
         ) -> my_agent::tool::ExecResult {
-            if (name == "read"
-                && args.value("path", std::string{})
+            static_cast<void>(context);
+            if (args.value("path", std::string{})
                     == std::string{kArgumentSentinel}) {
                 received_expected_args.store(true, std::memory_order_release);
             }
@@ -609,14 +1672,16 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
             };
         };
 
-    my_agent::AsyncHost host{std::move(fake_stream), std::move(fake_tool)};
+    TestHost host{
+        std::move(fake_stream), read_tool_runtime(std::move(fake_tool))};
     host.dispatch(my_agent::Msg{
         my_agent::SetProfile{.profile = my_agent::Profile::Minimal},
     });
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     std::string seen;
@@ -687,10 +1752,10 @@ TEST(UiLoopTest, RejectsARealToolCallThroughThePtyWithoutExecutingIt)
     std::atomic<bool> tool_executed{false};
     my_agent::StreamEffect fake_stream =
         [&stream_calls, kArgumentSentinel, kContinuationSentinel](
-            my_agent::Request, my_agent::EventSink sink
+            my_agent::Request, my_agent::ProviderEventSink sink
         ) {
             if (stream_calls.fetch_add(1, std::memory_order_acq_rel) == 0) {
-                sink(my_agent::Msg{my_agent::StreamToolCall{
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
                     .id = "pty-rejection-call",
                     .name = "read",
                     .args = nlohmann::json{
@@ -698,29 +1763,34 @@ TEST(UiLoopTest, RejectsARealToolCallThroughThePtyWithoutExecutingIt)
                     },
                 }});
             } else {
-                sink(my_agent::Msg{my_agent::StreamTextDelta{
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
                     .text = std::string{kContinuationSentinel},
                 }});
             }
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
         };
-    my_agent::ToolExecEffect fake_tool =
-        [&tool_executed](std::string_view, const nlohmann::json&)
+    my_agent::tool::ToolHandler fake_tool =
+        [&tool_executed](
+            const nlohmann::json&,
+            const my_agent::tool::ToolExecutionContext& context)
             -> my_agent::tool::ExecResult {
+            static_cast<void>(context);
             tool_executed.store(true, std::memory_order_release);
             return my_agent::tool::ToolOutput{
                 .text = "PTY_REJECTION_OUTPUT_5E7B",
             };
         };
 
-    my_agent::AsyncHost host{std::move(fake_stream), std::move(fake_tool)};
+    TestHost host{
+        std::move(fake_stream), read_tool_runtime(std::move(fake_tool))};
     host.dispatch(my_agent::Msg{
         my_agent::SetProfile{.profile = my_agent::Profile::Minimal},
     });
 
     std::thread ui_thread{[&host, replica] {
-        my_agent::ui::TerminalDriver terminal{replica, replica};
-        static_cast<void>(my_agent::ui::run_ui(host, terminal));
+        my_agent::ui::TerminalSession terminal{replica, replica};
+        my_agent::ui::Painter painter;
+        static_cast<void>(my_agent::ui::run_ui(host, terminal, painter));
     }};
 
     std::string seen;

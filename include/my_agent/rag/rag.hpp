@@ -1,30 +1,11 @@
 #pragma once
-// my_agent::rag — 文档 RAG 主干（学习线：复刻 agentty/src/rag/ 的主干四片）。
-//
-// 本头文件是接缝契约：#40 chunker + tokenize + BM25（词匹配路），
-// #41 混合检索（embed 语义路 + RRF 融合，本切片新增「语义路」一节），
-// Corpus 建库落盘是 #42，search_docs 工具接线是 #43。
-//
-// 接口纯净原则（#41 拍板）：本头文件只用 std —— http/nlohmann 是 rag 的
-// 实现依赖，PRIVATE 链接、一个 include 都不泄漏到这里。rag 的消费者
-// （测试、bench、#43 接线处）看到的接缝永远是纯类型。
-//
-// 设计要点：
-//   • tokenize 是索引端与查询端共用的唯一分词入口 —— 同一个函数保证两边
-//     词表一致，这是 BM25 正确性的前提。
-//       - ASCII：小写字母数字连续段为一个 token；不足 2 字节的 token
-//         丢弃（单字符无检索信号）。
-//       - 非 ASCII：按 UTF-8 码点解码，连续段切重叠二元组（CJK bigram，
-//         Lucene CJKBigramFilter 思路：无词典、对新词免疫、索引与查询
-//         切法必然一致）。孤立单字段原样发出。
-//   • BM25 常量：k1 = 1.5（tf 饱和），b = 0.75（长度归一）。
-//   • chunker：行对齐切块。max_lines 是软上限（绝不在代码围栏中间断开），
-//     max_chars 是硬上限（超长单行先按 UTF-8 边界强制分片再进切块循环）。
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -39,9 +20,6 @@ struct Chunk {
     int line_end   = 0;
     std::string text;
 
-    // 面包屑（contextual retrieval）：块所在的文档 + 标题链，
-    // 形如 "guide.md › 安装 › Linux"。参与 BM25 索引（标题 token 以
-    // 3 份副本入袋 = 字段加权），但绝不作为正文展示。
     std::string context;
 };
 
@@ -49,65 +27,40 @@ void tokenize(std::string_view s, std::vector<std::string>& out);
 
 struct Bm25Index {
     struct Posting { std::uint32_t doc; std::uint32_t tf; };
-    std::vector<std::vector<Posting>> postings;  // term-id → 出现名单
-    std::vector<std::uint32_t>        doc_len;   // chunk-id → token 总数（含重复）
+    std::vector<std::vector<Posting>> postings;
+    std::vector<std::uint32_t>        doc_len;
     double avg_doc_len = 0.0;
     std::size_t doc_count = 0;
-    std::unordered_map<std::string, std::uint32_t> term_ids;  // 词串 → term-id
+    std::unordered_map<std::string, std::uint32_t> term_ids;
 };
 
 [[nodiscard]] Bm25Index build_bm25(const std::vector<Chunk>& chunks);
 
-// 打分检索：按分数降序返回 (chunk-id, score)，截断至前 k；零交集的块
-// 不出现在结果里；同分按 chunk-id 升序。
 [[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
 bm25_search(const Bm25Index& idx, std::string_view query, std::size_t k);
 
-// 切块：把一份文档拆成有界的行对齐块。max_lines 软上限（不打断代码
-// 围栏），max_chars 硬上限（超长行先按 UTF-8 边界分片），overlap_lines
-// 让跨块边界的事实落进相邻两个块。
 [[nodiscard]] std::vector<Chunk>
 chunk_document(const std::string& path, const std::string& body,
                std::size_t max_lines = 40, std::size_t max_chars = 1600,
                std::size_t overlap_lines = 4);
 
-// ── 语义路（切片 #41：混合检索 + RRF）────────────────────────────────────
-//
-// dense 路与 BM25 词法路互补：BM25 死穴是词法鸿沟（「部署」vs「上线」零
-// token 交集 → 零分），dense 死穴是丢字面精确匹配。两路死穴互斥，故混合。
-// 分数不可通约（BM25 无上界，cosine 困在 [-1,1]），名次才是共同货币 → RRF。
-
-// 语义路的角色。instruction-tuned 模型（nomic / e5 系）对文档侧与查询侧
-// 使用不同的输入前缀 —— 不对称是训练出来的，裸文本对会可测地劣化匹配。
-// 角色必须穿过接缝，由 backend（懂模型方言的一方）翻译成前缀。
 enum class EmbedRole { Doc, Query };
 
-// embedding 端点配置。model 为空 = 语义路关闭（BM25-only）。
 struct EmbedConfig {
     std::string host = "localhost";
     int port = 11434;
-    std::string model;        // 如 "nomic-embed-text"
-    int timeout_ms = 30000;   // socket 级超时：连接建立与每次读各自的等待
-                              // 上限（非全请求墙钟，慢滴漏不触发）；建库
-                              // 批量可放宽
+    std::string model;
+    int timeout_ms = 30000;
 };
 
-// 语义路后端：一批文本 → 每条一个向量（与输入顺序对齐）。
-// 失败语义：整批失败；err 是给人看的诊断串（连接拒绝 / 模型不存在 /
-// 超时各不相同），调用方只做一件事 —— 降级 BM25-only。
 using EmbedBackend = std::function<
     std::expected<std::vector<std::vector<float>>, std::string>(
         const EmbedConfig&, const std::vector<std::string>&, EmbedRole)>;
 
-// 建库批量：每 64 条文本一个 /api/embed 请求（教材 kBatch=64，限请求体积）。
 inline constexpr std::size_t kEmbedBatch = 64;
 
-// RRF 的 k：60 是 canonical 值（教材同款），压扁头部位次差距、让两路
-// 意见都有话语权。本切片不调参，bench 打印它。
 inline constexpr double kRrfK = 60.0;
 
-// dense 侧存储：chunk-id → 向量。空 = BM25-only —— 「没有语义路」是
-// 合法状态而非错误，空容器就是这个语义的最直白表示。
 struct DenseIndex {
     std::vector<std::vector<float>> vecs;  // [chunk_id] → 模型维度（nomic 768）
 };
@@ -140,31 +93,98 @@ rrf_fuse(const std::vector<std::vector<std::uint32_t>>& ranked_lists,
 embed_corpus(const std::vector<Chunk>& chunks,
              const EmbedBackend& backend, const EmbedConfig& cfg);
 
-// 混合查询入口：query 向量化一次（Query 角色）→ cosine 线性扫出 dense
-// 名次 → bm25_search 出词法名次 → 两路各截候选池 max(k*8, 32) 深 →
-// rrf_fuse(kRrfK) 裁至 k。dense 名次表只收 cosine > 0 的块（零相似 =
-// 无信号或维度腐烂，负相似 = 反义；全库为 0 时融合自动退化为 BM25 单路）。
-// 降级语义在函数内部：dense.vecs 为空、cfg.model 为空、或本次 query
-// embed 失败 → 直接返回 bm25_search 结果（此时返回的分数是 BM25 原始分；
-// bench 的两级阶梯各自直调 bm25_search / hybrid_search，不经过降级路径）。
-//
-// 模式报告（#43）：降级是静默发生的，但调用方（search_docs 工具）必须
-// 诚实标注结果走了哪条路 —— RRF 融合分与 BM25 原始分量纲不同，mode 行
-// 就是量纲声明。所以降级真相只能从降级发生处带出来；调用方事后猜
-// （has_embeddings() && model 非空 → hybrid）在瞬断时会撒谎。
 enum class SearchMode { Hybrid, Bm25Only };
 
-struct SearchResult {
-    // (chunk-id, 分数)。hybrid = RRF 融合分（上界 ≈ 参与融合的路数/61）；
-    // BM25-only = BM25 原始分（无上界）。量纲由 mode 声明，分数不做归一化。
-    std::vector<std::pair<std::uint32_t, double>> hits;
+struct RankedScore {
+    double score = 0.0;
+    std::size_t rank = 0; // 1-based
+};
+
+struct Candidate {
+    std::uint32_t chunk_id = 0;
+    double final_score = 0.0;
+    std::optional<RankedScore> sparse;
+    std::optional<RankedScore> dense;
+};
+
+struct CandidateSet {
+    std::vector<Candidate> candidates;
     SearchMode mode = SearchMode::Bm25Only;
 };
 
-[[nodiscard]] SearchResult
-hybrid_search(const Bm25Index& bm25, const DenseIndex& dense,
-              std::string_view query, const EmbedBackend& backend,
-              const EmbedConfig& cfg, std::size_t k);
+struct RerankEvidence {
+    double lexical_coverage = 0.0;
+    std::optional<double> model_score;
+    double final_score = 0.0;
+};
+
+struct Provenance {
+    std::string path;
+    int line_start = 0;
+    int line_end = 0;
+    std::string context;
+};
+
+struct RankedPassage {
+    Provenance provenance;
+    std::string text;
+    double score = 0.0;
+    std::optional<RankedScore> sparse;
+    std::optional<RankedScore> dense;
+    std::optional<RerankEvidence> rerank;
+};
+
+struct RetrievalResult {
+    std::vector<RankedPassage> passages;
+    SearchMode mode = SearchMode::Bm25Only;
+    std::size_t corpus_chunk_count = 0;
+};
+
+enum class RerankMode {
+    Skipped,
+    LocalOnly,
+    ModelEnhanced,
+    ModelFallback,
+};
+
+struct RerankReport {
+    RerankMode mode = RerankMode::Skipped;
+    std::string backend_error;
+};
+
+struct RerankResult {
+    RetrievalResult retrieval;
+    RerankReport report;
+};
+
+using RerankBackend = std::function<std::expected<std::vector<double>, std::string>(
+                        std::string_view query, const std::vector<std::string>& passages)>;
+
+struct TeiRerankConfig {
+    std::string host = "127.0.0.1";
+    int port = 8080;
+    int timeout_ms = 30000;
+};
+
+using TeiRerankTransport = std::function<std::expected<std::string, std::string>(
+    const TeiRerankConfig&, std::string_view request_body)>;
+
+[[nodiscard]] RerankBackend
+make_tei_rerank_backend(TeiRerankConfig config, TeiRerankTransport transport = {});
+
+[[nodiscard]] RerankResult
+rerank_passages(std::string_view query, RetrievalResult result, const RerankBackend& backend = {});
+
+[[nodiscard]] CandidateSet
+retrieve_candidates(const Bm25Index& bm25, const DenseIndex& dense,
+                    std::string_view query, const EmbedBackend& backend,
+                    const EmbedConfig& cfg, std::size_t k);
+
+[[nodiscard]] std::string
+build_tei_rerank_request_body(std::string_view query, const std::vector<std::string>& passages);
+
+[[nodiscard]] std::expected<std::vector<double>, std::string>
+parse_tei_rerank_response(std::string_view body, std::size_t expected_count);
 
 // ── Ollama /api/embed 真实后端（组装处使用；测试注入假 backend）─────────
 //
@@ -264,22 +284,18 @@ public:
     [[nodiscard]] std::size_t chunk_count() const;
     // 库中存在已对位的 dense 向量 —— 与本次会话是否配模型无关：
     // BM25-only 会话搬运缓存向量后仍为 true（查询侧配空模型时
-    // hybrid_search 自己降级，与库里有没有向量是两回事）。
+    // retrieve_candidates 自己降级，与库里有没有向量是两回事）。
     [[nodiscard]] bool has_embeddings() const;
     [[nodiscard]] const std::vector<Chunk>& chunks() const;
 
-    // 组装结果的只读视图：bench 量具拿既有检索原语（bm25_search /
-    // hybrid_search）直接打分，保持度量口径与历史基线逐位可比；
-    // #43 的 search_docs 工具走 search() 入口，不该用这两个。
+    // 组装结果的只读视图：bench 量具拿既有检索原语直接打分，保持度量
+    // 口径与历史基线逐位可比；search_docs 工具走 retrieve() 入口。
     [[nodiscard]] const Bm25Index& bm25() const;
     [[nodiscard]] const DenseIndex& dense() const;
 
-    // 薄委托 hybrid_search：dense 空/未配模型/查询 embed 失败 → 恒等
-    // 降级 bm25_search 语义。模式随 SearchResult 一路带出 —— Corpus 不
-    // 加判断、不丢信息。
-    [[nodiscard]] SearchResult
-    search(std::string_view query, const EmbedBackend& backend,
-           const EmbedConfig& cfg, std::size_t k) const;
+    [[nodiscard]] RetrievalResult
+    retrieve(std::string_view query, const EmbedBackend& backend,
+            const EmbedConfig& cfg, std::size_t k) const;
 
 private:
     std::filesystem::path root_;    // 空 = 内存建库（不读不写缓存）

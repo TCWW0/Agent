@@ -2,7 +2,7 @@
 
 #include "my_agent/tool/effects.hpp"
 #include "my_agent/tool/memory_store.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -114,20 +114,21 @@ ExecResult execute_forget(
 
 }  // namespace
 
-std::vector<ToolDef> make_memory_tools(
+std::vector<RegisteredTool> make_memory_tools(
     std::shared_ptr<memory::MemoryStore> store
 )
 {
-    std::vector<ToolDef> tools;
+    std::vector<RegisteredTool> tools;
     tools.reserve(2);
 
-    tools.push_back(ToolDef{
-        .name = "remember",
-        .description =
-            "Store a durable fact about the user or this project so it is "
-            "available in future turns. Keep each fact short and "
-            "self-contained.",
-        .input_schema = nlohmann::json{
+    tools.push_back(RegisteredTool{
+        .descriptor = ToolDescriptor{
+            .name = ToolName{.value = "remember"},
+            .description =
+                "Store a durable fact about the user or this project so it is "
+                "available in future turns. Keep each fact short and "
+                "self-contained.",
+            .input_schema = nlohmann::json{
             {"type", "object"},
             {"properties", nlohmann::json{
                 {"text", nlohmann::json{
@@ -148,20 +149,25 @@ std::vector<ToolDef> make_memory_tools(
         },
         // 如实声明：这个工具写文件。write profile 下 policy 一律 Allow，所以
         // 演示路径不受影响；ask/minimal 下用户才能管住 agent 记了什么。
-        .effects = {Effect::WriteFs},
-        .execute = [store](const nlohmann::json& args) {
+            .effects = {Effect::WriteFs},
+            .replay = {},
+        },
+        .handler = [store](
+            const nlohmann::json& args,
+            const ToolExecutionContext&) {
             return execute_remember(*store, args);
         },
     });
 
-    tools.push_back(ToolDef{
-        .name = "forget",
-        .description =
-            "Remove stored memory records. Prefer the id shown in front of each "
-            "record in the memory block; that is exact. Text matching is a "
-            "literal substring search over the stored wording and removes every "
-            "record it hits.",
-        .input_schema = nlohmann::json{
+    tools.push_back(RegisteredTool{
+        .descriptor = ToolDescriptor{
+            .name = ToolName{.value = "forget"},
+            .description =
+                "Remove stored memory records. Prefer the id shown in front of each "
+                "record in the memory block; that is exact. Text matching is a "
+                "literal substring search over the stored wording and removes every "
+                "record it hits.",
+            .input_schema = nlohmann::json{
             {"type", "object"},
             {"properties", nlohmann::json{
                 {"id", nlohmann::json{
@@ -182,8 +188,12 @@ std::vector<ToolDef> make_memory_tools(
             }},
             {"additionalProperties", false},
         },
-        .effects = {Effect::WriteFs},
-        .execute = [store](const nlohmann::json& args) {
+            .effects = {Effect::WriteFs},
+            .replay = {},
+        },
+        .handler = [store](
+            const nlohmann::json& args,
+            const ToolExecutionContext&) {
             return execute_forget(*store, args);
         },
     });

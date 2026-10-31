@@ -2,12 +2,14 @@
 // include/my_agent/tool/search_docs.hpp；教材对照与两处拍板差异也记在那。
 //
 // 本文件先落 Red 占位（编译过、断言挂），Green 由用户按
-// tests/search_docs_tool_test.cpp 的 Red 测试亲手实现；make_search_docs_tool
-// 是纯组装胶水（授权块），直接实现。
+// tests/search_docs_tool_test.cpp 的 Red 测试亲手实现；原生注册 factory
+// 直接组装 descriptor 和 handler。索引由注入的共享状态持有。
 #include "my_agent/rag/rag.hpp"
 #include "my_agent/tool/search_docs.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_protocol.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -15,22 +17,24 @@
 #include <expected>
 #include <format>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <filesystem>
 #include <vector>
+#include <utility>
 
 namespace my_agent::tool::docs {
 namespace fs = std::filesystem;
 
-// ── Red 占位 ──────────────────────────────────────────────────────────────
-// Green 说明（按 Red 测试实现，占位逻辑故意错）：
-//   • resolve_config：解析顺序与探词语义见头文件；占位返回全默认值。
-//   • docs_tree_fingerprint：门禁镜像 Corpus::build 的 walk；占位恒 0。
-//   • render_search_results：格式契约见头文件；占位返回空串。
-//   • execute_search_docs：校验→配置检查→lock→漂移才 build→search→render；
-//     占位直接报「未实现」。
+namespace {
+
+constexpr std::size_t kCandidateMultiplier = 4;
+constexpr std::size_t kMaxCandidateK = kMaxK * kCandidateMultiplier;
+
+}// namespace
+
 DocsConfig resolve_config(
     const std::function<const char*(const char*)>& getenv,
     const std::filesystem::path& cwd,
@@ -52,6 +56,20 @@ DocsConfig resolve_config(
         const auto [end,ec] = std::from_chars(p,p+std::strlen(p),port);
         if (ec == std::errc{} && end == p + std::strlen(p)&& port > 0 && port <= 65535)
             cfg.embed.port = port;
+    }
+    if (const char* host = getenv("MY_AGENT_RERANK_HOST"); host && host[0] != '\0') {
+        cfg.rerank = rag::TeiRerankConfig{};
+        cfg.rerank->host = host;
+
+        if (const char* port_text = getenv("MY_AGENT_RERANK_PORT"); port_text && port_text[0] != '\0') {
+            int port = 0;
+            const char* end = port_text + std::strlen(port_text);
+            const auto [parsed_end, error] = std::from_chars(port_text, end, port);
+
+            if (error == std::errc{} && parsed_end == end && port > 0 && port <= 65535) {
+                cfg.rerank->port = port;
+            }
+        }
     }
     return cfg;
 }
@@ -118,33 +136,35 @@ std::uint64_t docs_tree_fingerprint(const std::filesystem::path& root) {
     return fp;
 }
 
-std::string render_search_results(const rag::Corpus& corpus,
-                                  const rag::SearchResult& result,
+std::string render_search_results(const rag::RerankResult& result,
                                   const DocsConfig& cfg) {
+    const rag::RetrievalResult& retrieval = result.retrieval;
     std::string out;
-    const auto& chunks = corpus.chunks();
 
-    for (const auto& [id, score] : result.hits) {
-        const auto& chunk = chunks[id];
+    for (const rag::RankedPassage& passage : retrieval.passages) {
+        const rag::Provenance& provenance = passage.provenance;
+        const double displayed_score = passage.rerank
+            ? passage.rerank->final_score
+            : passage.score;
 
         out += std::format(
             "{}:{}-{} (score {:.4f})\n",
-            chunk.path,
-            chunk.line_start,
-            chunk.line_end,
-            score
+            provenance.path,
+            provenance.line_start,
+            provenance.line_end,
+            displayed_score
         );
 
-        out += chunk.text;
+        out += passage.text;
         out += "\n\n";
     }
 
-    if (result.hits.empty()) {
+    if (retrieval.passages.empty()) {
         out += "no matching passages\n\n";
     }
 
     std::string mode;
-    if (result.mode == rag::SearchMode::Hybrid) {
+    if (retrieval.mode == rag::SearchMode::Hybrid) {
         mode = "hybrid";
     } else {
         mode = cfg.embed.model.empty()
@@ -155,9 +175,18 @@ std::string render_search_results(const rag::Corpus& corpus,
     out += std::format(
         "mode: {} — {} chunks from {}",
         mode,
-        corpus.chunk_count(),
+        retrieval.corpus_chunk_count,
         cfg.root.string()
     );
+
+    if (result.report.mode == rag::RerankMode::ModelFallback) {
+        out += "\nrerank: model-fallback";
+
+        if (!result.report.backend_error.empty()) {
+            out += " — ";
+            out += result.report.backend_error;
+        }
+    }
 
     return out;
 }
@@ -165,12 +194,13 @@ std::string render_search_results(const rag::Corpus& corpus,
 ExecResult execute_search_docs(const nlohmann::json& args,
                                const DocsConfig& cfg,
                                const rag::EmbedBackend& backend,
-                               DocsIndex& index) {
+                               DocsIndex& index,
+                               const rag::RerankBackend& rerank_backend) {
     if (!args.is_object() || !args.contains("query") || !args["query"].is_string()
         || args["query"].get<std::string>().empty())
         return std::unexpected(ToolError{ErrorKind::InvalidArgs,
                      "Docs query requires non-empty string query"});
-    
+
     std::size_t k = kDefaultK;
     if (args.contains("k")) {
         if (!args["k"].is_number_integer()) 
@@ -199,21 +229,39 @@ ExecResult execute_search_docs(const nlohmann::json& args,
         index.fingerprint = fp;
     }
 
-    const rag::SearchResult res = index.corpus.search(args["query"].get<std::string>(), backend, cfg.embed, k);
-    return ToolOutput{.text = render_search_results(index.corpus, res, cfg)};
+    const std::string query = args["query"].get<std::string>();
+
+    const std::size_t candidate_k = std::min(k * kCandidateMultiplier, kMaxCandidateK);
+
+    rag::RetrievalResult retrieved = index.corpus.retrieve(query, backend, cfg.embed, candidate_k);
+
+    rag::RerankResult reranked = rag::rerank_passages(query, std::move(retrieved), rerank_backend);
+
+    if (reranked.retrieval.passages.size() > k) {
+        reranked.retrieval.passages.resize(k);
+    }
+
+    return ToolOutput{
+        .text = render_search_results(reranked, cfg),
+    };
 }
 
-// ── 组装胶水（授权块）────────────────────────────────────────────────────
-ToolDef make_search_docs_tool() {
-    return ToolDef{
-        .name = "search_docs",
-        .description =
-            "Search the project's documentation (markdown files under the "
-            "configured docs root) for passages relevant to a query. Returns "
-            "ranked passages, each with its file path, line range, text and "
-            "relevance score. Use `read` on a returned path to see the full "
-            "document around a passage. A trailing `mode:` line tells whether "
-            "results came from hybrid (lexical+semantic) or BM25-only search.",
+// ── 原生注册 ─────────────────────────────────────────────────────────────
+RegisteredTool make_search_docs_tool(
+    DocsConfig cfg,
+    std::shared_ptr<DocsIndex> index,
+    rag::EmbedBackend backend,
+    rag::RerankBackend rerank_backend) {
+    return RegisteredTool{
+        .descriptor = ToolDescriptor{
+            .name = ToolName{.value = "search_docs"},
+            .description =
+                "Search the project's documentation (markdown files under the "
+                "configured docs root) for passages relevant to a query. Returns "
+                "ranked passages, each with its file path, line range, text and "
+                "relevance score. Use `read` on a returned path to see the full "
+                "document around a passage. A trailing `mode:` line tells whether "
+                "results came from hybrid (lexical+semantic) or BM25-only search.",
         .input_schema = nlohmann::json{
             {"type", "object"},
             {"properties", nlohmann::json{
@@ -232,18 +280,14 @@ ToolDef make_search_docs_tool() {
             {"required", nlohmann::json::array({"query"})},
             {"additionalProperties", false},
         },
-        .effects = {Effect::ReadFs, Effect::WriteFs, Effect::Net},
-        .execute = [](const nlohmann::json& args) -> ExecResult {
-            static DocsIndex index;
-            const DocsConfig cfg = resolve_config(
-                [](const char* name) { return std::getenv(name); },
-                std::filesystem::current_path(),
-                [](const std::filesystem::path& p) {
-                    std::error_code ec;
-                    const bool ok = std::filesystem::is_directory(p, ec);
-                    return !ec && ok;
-                });
-            return execute_search_docs(args, cfg, rag::ollama_embed, index);
+            .effects = {Effect::ReadFs, Effect::WriteFs, Effect::Net},
+            .replay = {},
+        },
+        .handler = [cfg = std::move(cfg), index = std::move(index),
+                    backend = std::move(backend), rerank_backend = std::move(rerank_backend)](
+            const nlohmann::json& args,
+            const ToolExecutionContext&) -> ExecResult {
+            return execute_search_docs(args, cfg, backend, *index, rerank_backend);
         },
     };
 }

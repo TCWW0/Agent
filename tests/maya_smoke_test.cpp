@@ -13,8 +13,9 @@
 // We deliberately DO NOT touch maya's run<Program>() event loop; this project
 // keeps its own AsyncHost/WorkPool loop and uses maya only for rendering.
 
-#include <maya/maya.hpp>
+#include <maya/dsl.hpp>
 #include <maya/render/frame.hpp>
+#include <maya/style/theme.hpp>
 
 #include <gtest/gtest.h>
 

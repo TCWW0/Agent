@@ -1,5 +1,7 @@
 #include "my_agent/ui/input_editor.hpp"
 
+#include "my_agent/ui/composer_paste.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <string_view>
@@ -20,6 +22,17 @@ std::size_t normalize_cursor(std::string_view buffer, std::size_t cursor) noexce
     if (cursor == std::string::npos || cursor > buffer.size()) {
         return buffer.size();
     }
+    for (std::size_t position = 0; position < cursor;) {
+        const std::size_t length = paste_placeholder_len_at(buffer, position);
+        if (length != 0) {
+            if (cursor < position + length) {
+                return position;
+            }
+            position += length;
+            continue;
+        }
+        ++position;
+    }
     while (cursor > 0 && cursor < buffer.size()
            && is_utf8_continuation(static_cast<unsigned char>(buffer[cursor]))) {
         --cursor;
@@ -32,6 +45,10 @@ std::size_t previous_boundary(std::string_view buffer, std::size_t cursor) noexc
 {
     if (cursor == 0) {
         return 0;
+    }
+    if (const std::size_t length = paste_placeholder_len_ending_at(
+            buffer, cursor); length != 0) {
+        return cursor - length;
     }
     --cursor;
     while (cursor > 0
@@ -46,6 +63,10 @@ std::size_t next_boundary(std::string_view buffer, std::size_t cursor) noexcept
 {
     if (cursor >= buffer.size()) {
         return buffer.size();
+    }
+    if (const std::size_t length = paste_placeholder_len_at(
+            buffer, cursor); length != 0) {
+        return cursor + length;
     }
     ++cursor;
     while (cursor < buffer.size()
@@ -190,6 +211,8 @@ InputEditorState edit_input(
             break;
 
         case Key::Kind::Enter:
+        case Key::Kind::ResumeQueue:
+        case Key::Kind::ClearQueue:
         case Key::Kind::Interrupt:
         case Key::Kind::Eof:
             break;

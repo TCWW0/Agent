@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -597,7 +598,7 @@ TEST(Rrf, TruncatesToOutK) {
 
 TEST(Rrf, DeepRankStillContributes) {
     // 候选池深度的存在理由：第 40 名不是零分，是 1/(60+40)——
-    // 深位候选仍能在两路叠加后浮上来（hybrid_search 的 pool 语义由此而来）
+    // 深位候选仍能在两路叠加后浮上来（候选池扩张语义由此而来）
     std::vector<std::uint32_t> list(40);
     for (std::uint32_t i = 0; i < 40; ++i) list[i] = i;
     const auto fused = rag::rrf_fuse({list}, 60.0, 40);
@@ -744,13 +745,60 @@ TEST(Hybrid, FusesBm25AndDenseIntoRRFOrder) {
         EXPECT_EQ(role, rag::EmbedRole::Query);
         return std::vector<std::vector<float>>{{1.f, 0.1f}};
     };
-    const auto fused = rag::hybrid_search(idx, dense, "beta", backend, cfg, 3);
-    ASSERT_EQ(fused.hits.size(), 3u);
+    const auto fused =
+        rag::retrieve_candidates(idx, dense, "beta", backend, cfg, 3);
+    ASSERT_EQ(fused.candidates.size(), 3u);
     // RRF 手算：B = 1/62(词法r2) + 1/61(语义r1) > A = 1/61 + 1/63 > C = 1/62
-    EXPECT_EQ(fused.hits[0].first, 1u);
-    EXPECT_EQ(fused.hits[1].first, 0u);
-    EXPECT_EQ(fused.hits[2].first, 2u);   // C 词法路根本没看见 —— 靠语义路浮上来
-    EXPECT_DOUBLE_EQ(fused.hits[0].second, 1.0 / 62.0 + 1.0 / 61.0);
+    EXPECT_EQ(fused.candidates[0].chunk_id, 1u);
+    EXPECT_EQ(fused.candidates[1].chunk_id, 0u);
+    EXPECT_EQ(fused.candidates[2].chunk_id, 2u);
+    EXPECT_DOUBLE_EQ(fused.candidates[0].final_score,
+                     1.0 / 62.0 + 1.0 / 61.0);
+}
+
+// ── M1.4：显式候选产物 ──────────────────────────────────────────────────
+// 融合后的候选不能只剩最终分数；后续 rerank、trace 与反馈学习还需要知道
+// 它在 sparse/dense 各路的原始分数与名次。名次统一使用 1-based。
+TEST(HybridCandidates, PreservesPerRouteScoresAndOneBasedRanks) {
+    const std::vector<rag::Chunk> chunks{
+        make_chunk("beta"),
+        make_chunk("alpha beta"),
+        make_chunk("alpha alpha"),
+    };
+    const rag::Bm25Index idx = rag::build_bm25(chunks);
+    const rag::DenseIndex dense{{{0.f, 1.f}, {1.f, 0.f}, {1.f, 1.f}}};
+    const rag::EmbedConfig cfg{.model = "fake-model"};
+    const rag::EmbedBackend backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>&,
+           rag::EmbedRole)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        return std::vector<std::vector<float>>{{1.f, 0.1f}};
+    };
+
+    const auto sparse = rag::bm25_search(idx, "beta", 3);
+    ASSERT_EQ(sparse.size(), 2u);
+    ASSERT_EQ(sparse[0].first, 0u);
+    ASSERT_EQ(sparse[1].first, 1u);
+
+    const rag::CandidateSet result =
+        rag::retrieve_candidates(idx, dense, "beta", backend, cfg, 3);
+
+    ASSERT_EQ(result.mode, rag::SearchMode::Hybrid);
+    ASSERT_EQ(result.candidates.size(), 3u);
+
+    // B 同时被两路命中：sparse 第 2、dense 第 1，因此融合后排第 1。
+    const rag::Candidate& b = result.candidates[0];
+    EXPECT_EQ(b.chunk_id, 1u);
+    EXPECT_DOUBLE_EQ(b.final_score, 1.0 / 62.0 + 1.0 / 61.0);
+
+    ASSERT_TRUE(b.sparse.has_value());
+    EXPECT_EQ(b.sparse->rank, 2u);
+    EXPECT_DOUBLE_EQ(b.sparse->score, sparse[1].second);
+
+    ASSERT_TRUE(b.dense.has_value());
+    EXPECT_EQ(b.dense->rank, 1u);
+    EXPECT_NEAR(b.dense->score, 1.0 / std::sqrt(1.01), 1e-6);
 }
 
 TEST(Hybrid, ZeroCosineChunksStayOutOfDenseRank) {
@@ -770,11 +818,12 @@ TEST(Hybrid, ZeroCosineChunksStayOutOfDenseRank) {
            -> std::expected<std::vector<std::vector<float>>, std::string> {
         return std::vector<std::vector<float>>{{1.f, 0.f}};
     };
-    const auto fused = rag::hybrid_search(idx, dense, "beta", backend, cfg, 5);
-    ASSERT_EQ(fused.hits.size(), 1u);   // Z 两路都没份
-    EXPECT_EQ(fused.hits[0].first, 0u);
+    const auto fused =
+        rag::retrieve_candidates(idx, dense, "beta", backend, cfg, 5);
+    ASSERT_EQ(fused.candidates.size(), 1u);   // Z 两路都没份
+    EXPECT_EQ(fused.candidates[0].chunk_id, 0u);
     // A = 词法第1名 + 语义第1名
-    EXPECT_DOUBLE_EQ(fused.hits[0].second, 2.0 / 61.0);
+    EXPECT_DOUBLE_EQ(fused.candidates[0].final_score, 2.0 / 61.0);
 }
 
 TEST(Hybrid, EmptyDenseDegradesToBm25WithoutCallingBackend) {
@@ -791,9 +840,14 @@ TEST(Hybrid, EmptyDenseDegradesToBm25WithoutCallingBackend) {
         return std::vector<std::vector<float>>{{1.f}};
     };
     const rag::EmbedConfig cfg{.model = "fake-model"};
-    const auto fused =
-        rag::hybrid_search(idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));   // 逐位一致，含原始分
+    const auto result = rag::retrieve_candidates(
+        idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
+    const auto expected = rag::bm25_search(idx, "beta", 2);
+    ASSERT_EQ(result.candidates.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(result.candidates[i].chunk_id, expected[i].first);
+        EXPECT_DOUBLE_EQ(result.candidates[i].final_score, expected[i].second);
+    }
     EXPECT_FALSE(called);   // dense 空 → 查询向量化都是浪费
 }
 
@@ -810,9 +864,14 @@ TEST(Hybrid, QueryEmbedFailureDegradesToBm25) {
         return std::unexpected(std::string{"模拟查询向量化失败"});
     };
     const rag::EmbedConfig cfg{.model = "fake-model"};
-    const auto fused =
-        rag::hybrid_search(idx, dense, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));
+    const auto result =
+        rag::retrieve_candidates(idx, dense, "beta", backend, cfg, 2);
+    const auto expected = rag::bm25_search(idx, "beta", 2);
+    ASSERT_EQ(result.candidates.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(result.candidates[i].chunk_id, expected[i].first);
+        EXPECT_DOUBLE_EQ(result.candidates[i].final_score, expected[i].second);
+    }
 }
 
 TEST(Hybrid, EmptyModelDegradesWithoutCallingBackend) {
@@ -829,9 +888,14 @@ TEST(Hybrid, EmptyModelDegradesWithoutCallingBackend) {
         return std::vector<std::vector<float>>{{1.f}};
     };
     const rag::EmbedConfig cfg{.model = ""};   // 未配模型 = BM25-only
-    const auto fused =
-        rag::hybrid_search(idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
-    EXPECT_EQ(fused.hits, rag::bm25_search(idx, "beta", 2));
+    const auto result = rag::retrieve_candidates(
+        idx, rag::DenseIndex{}, "beta", backend, cfg, 2);
+    const auto expected = rag::bm25_search(idx, "beta", 2);
+    ASSERT_EQ(result.candidates.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(result.candidates[i].chunk_id, expected[i].first);
+        EXPECT_DOUBLE_EQ(result.candidates[i].final_score, expected[i].second);
+    }
     EXPECT_FALSE(called);
 }
 // ── #43 接缝扩展：SearchMode（降级真相从降级发生处带出）──────────────────
@@ -854,7 +918,8 @@ TEST(SearchMode, HybridReportsHybridWhenBothPathsLive) {
            -> std::expected<std::vector<std::vector<float>>, std::string> {
         return std::vector<std::vector<float>>{{1.f, 0.1f}};
     };
-    const auto r = rag::hybrid_search(idx, dense, "beta", backend, cfg, 3);
+    const auto r =
+        rag::retrieve_candidates(idx, dense, "beta", backend, cfg, 3);
     EXPECT_EQ(r.mode, rag::SearchMode::Hybrid);
 }
 
@@ -873,13 +938,13 @@ TEST(SearchMode, DegradePathsAllReportBm25Only) {
            -> std::expected<std::vector<std::vector<float>>, std::string> {
         return std::vector<std::vector<float>>{{1.f, 0.f}};
     };
-    EXPECT_EQ(rag::hybrid_search(idx, rag::DenseIndex{}, "beta", ok_backend,
-                                 cfg, 2).mode,
+    EXPECT_EQ(rag::retrieve_candidates(idx, rag::DenseIndex{}, "beta",
+                                       ok_backend, cfg, 2).mode,
               rag::SearchMode::Bm25Only);
 
     // ② model 空（未配置 = 合法降级，不是错误）
-    EXPECT_EQ(rag::hybrid_search(idx, dense, "beta", ok_backend,
-                                 rag::EmbedConfig{}, 2).mode,
+    EXPECT_EQ(rag::retrieve_candidates(idx, dense, "beta", ok_backend,
+                                       rag::EmbedConfig{}, 2).mode,
               rag::SearchMode::Bm25Only);
 
     // ③ query embed 失败（瞬断场景 —— 事后猜模式在这里撒谎）
@@ -890,22 +955,25 @@ TEST(SearchMode, DegradePathsAllReportBm25Only) {
            -> std::expected<std::vector<std::vector<float>>, std::string> {
         return std::unexpected(std::string{"模拟瞬断"});
     };
-    EXPECT_EQ(rag::hybrid_search(idx, dense, "beta", fail_backend, cfg, 2).mode,
+    EXPECT_EQ(rag::retrieve_candidates(idx, dense, "beta", fail_backend,
+                                       cfg, 2).mode,
               rag::SearchMode::Bm25Only);
 
     // ④ dense 名次表为空（全库零相似/无正相似）
     //const rag::DenseIndex rotten{{{2.f, 0.f}, {0.f, 2.f}}};  // 与查询向量正交  (错误。为同向而非正交)
     const rag::DenseIndex rotten{{{0.f, 1.f}, {0.f, 2.f}}};
-    EXPECT_EQ(rag::hybrid_search(idx, rotten, "beta", ok_backend, cfg, 2).mode,
+    EXPECT_EQ(rag::retrieve_candidates(idx, rotten, "beta", ok_backend,
+                                       cfg, 2).mode,
               rag::SearchMode::Bm25Only);
 
     // 只有有任一一个结果与查询不是零相似，那么 embedding 就会参与评分，此时会进入 Hybird
     const rag::DenseIndex rotten1{{{2.f, 0.f}, {0.f, 2.f}}};
-    EXPECT_EQ(rag::hybrid_search(idx, rotten1, "beta", ok_backend, cfg, 2).mode,
+    EXPECT_EQ(rag::retrieve_candidates(idx, rotten1, "beta", ok_backend,
+                                       cfg, 2).mode,
               rag::SearchMode::Hybrid);
 }
 
-TEST(SearchMode, CorpusSearchPropagatesMode) {
+TEST(SearchMode, CorpusRetrievePropagatesMode) {
     const std::vector<rag::Chunk> chunks{make_chunk("beta")};
     const rag::EmbedBackend backend =
         [](const rag::EmbedConfig&,
@@ -921,11 +989,524 @@ TEST(SearchMode, CorpusSearchPropagatesMode) {
     c.build_from_memory({{"a.md", "beta content"}}, backend,
                         rag::EmbedConfig{.model = "fake-model"});
     ASSERT_TRUE(c.has_embeddings());
-    EXPECT_EQ(c.search("beta", backend,
-                       rag::EmbedConfig{.model = "fake-model"}, 3).mode,
+    EXPECT_EQ(c.retrieve("beta", backend,
+                         rag::EmbedConfig{.model = "fake-model"}, 3).mode,
               rag::SearchMode::Hybrid);
-    EXPECT_EQ(c.search("beta", backend, rag::EmbedConfig{}, 3).mode,
+    EXPECT_EQ(c.retrieve("beta", backend, rag::EmbedConfig{}, 3).mode,
               rag::SearchMode::Bm25Only);
+}
+
+// ── M1.1：富检索结果（第一条 tracer bullet）────────────────────────────
+// 公共 retrieve 接缝把位置型候选投影成自包含 passage；调用方不再需要
+// 自行使用 chunk-id 回查语料。
+TEST(CorpusRetrieve, ReturnsSelfContainedPassagesInRankOrder) {
+    const rag::EmbedBackend backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>&,
+           rag::EmbedRole)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        return std::unexpected(std::string{"BM25-only 测试不应调用 embed"});
+    };
+    const rag::EmbedConfig cfg;  // 空模型：固定走 BM25-only，隔离语义路变量
+
+    rag::Corpus corpus;
+    corpus.build_from_memory(
+        {{"alpha.md", "zephyr zephyr installation procedure\n"},
+         {"beta.md", "zephyr troubleshooting reference\n"},
+         {"ignored.md", "harbor tides schedule\n"}},
+        backend, cfg);
+
+    const rag::RetrievalResult retrieved =
+        corpus.retrieve("zephyr", backend, cfg, 2);
+
+    ASSERT_EQ(retrieved.passages.size(), 2u);
+    EXPECT_EQ(retrieved.mode, rag::SearchMode::Bm25Only);
+    EXPECT_EQ(retrieved.passages[0].provenance.path, "alpha.md");
+    EXPECT_EQ(retrieved.passages[1].provenance.path, "beta.md");
+    EXPECT_EQ(retrieved.passages[0].text,
+              "zephyr zephyr installation procedure\n");
+    EXPECT_EQ(retrieved.passages[1].text,
+              "zephyr troubleshooting reference\n");
+    EXPECT_GT(retrieved.passages[0].score, retrieved.passages[1].score);
+}
+
+TEST(CorpusRetrieve, PreservesCandidateEvidenceInPassages) {
+    const rag::EmbedBackend backend =
+        [](const rag::EmbedConfig&,
+           const std::vector<std::string>& texts,
+           rag::EmbedRole role)
+           -> std::expected<std::vector<std::vector<float>>, std::string> {
+        if (role == rag::EmbedRole::Query) {
+            return std::vector<std::vector<float>>{{1.f, 0.1f}};
+        }
+
+        std::vector<std::vector<float>> vectors;
+        vectors.reserve(texts.size());
+        for (const std::string& text : texts) {
+            if (text.find("alpha alpha") != std::string::npos) {
+                vectors.push_back({1.f, 1.f});
+            } else if (text.find("alpha beta") != std::string::npos) {
+                vectors.push_back({1.f, 0.f});
+            } else {
+                vectors.push_back({0.f, 1.f});
+            }
+        }
+        return vectors;
+    };
+    const rag::EmbedConfig cfg{.model = "fake-model"};
+
+    rag::Corpus corpus;
+    corpus.build_from_memory(
+        {{"a.md", "beta"},
+         {"b.md", "alpha beta"},
+         {"c.md", "alpha alpha"}},
+        backend, cfg);
+
+    const rag::CandidateSet candidates = rag::retrieve_candidates(
+        corpus.bm25(), corpus.dense(), "beta", backend, cfg, 3);
+    const rag::RetrievalResult retrieved =
+        corpus.retrieve("beta", backend, cfg, 3);
+
+    ASSERT_EQ(retrieved.mode, candidates.mode);
+    ASSERT_EQ(retrieved.passages.size(), candidates.candidates.size());
+
+    for (std::size_t rank = 0; rank < candidates.candidates.size(); ++rank) {
+        const rag::Candidate& candidate = candidates.candidates[rank];
+        const rag::RankedPassage& passage = retrieved.passages[rank];
+
+        EXPECT_DOUBLE_EQ(passage.score, candidate.final_score);
+        ASSERT_EQ(passage.sparse.has_value(), candidate.sparse.has_value());
+        ASSERT_EQ(passage.dense.has_value(), candidate.dense.has_value());
+
+        if (candidate.sparse) {
+            EXPECT_EQ(passage.sparse->rank, candidate.sparse->rank);
+            EXPECT_DOUBLE_EQ(passage.sparse->score, candidate.sparse->score);
+        }
+        if (candidate.dense) {
+            EXPECT_EQ(passage.dense->rank, candidate.dense->rank);
+            EXPECT_DOUBLE_EQ(passage.dense->score, candidate.dense->score);
+        }
+    }
+}
+
+// ── M2.1：独立 rerank 阶段 ─────────────────────────────────────────────
+TEST(Rerank, LocalBaselineReordersWithoutDroppingPassages) {
+    rag::RetrievalResult input{
+        .passages = {
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "a.md"},
+                .text = "deployment notes",
+                .score = 0.40,
+                .sparse = rag::RankedScore{.score = 3.0, .rank = 1},
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "b.md"},
+                .text = "harbor tides",
+                .score = 0.40,
+                .dense = rag::RankedScore{.score = 0.8, .rank = 1},
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "c.md"},
+                .text = "deployment procedure",
+                .score = 0.40,
+                .sparse = rag::RankedScore{.score = 1.0, .rank = 3},
+                .dense = rag::RankedScore{.score = 0.4, .rank = 2},
+            },
+        },
+        .mode = rag::SearchMode::Hybrid,
+        .corpus_chunk_count = 3,
+    };
+
+    const rag::RerankResult reranked =
+        rag::rerank_passages("deployment procedure", std::move(input));
+
+    EXPECT_EQ(reranked.report.mode, rag::RerankMode::LocalOnly);
+    ASSERT_EQ(reranked.retrieval.passages.size(), 3u);
+    EXPECT_EQ(reranked.retrieval.mode, rag::SearchMode::Hybrid);
+    EXPECT_EQ(reranked.retrieval.corpus_chunk_count, 3u);
+
+    const rag::RankedPassage& first = reranked.retrieval.passages[0];
+    EXPECT_EQ(first.provenance.path, "c.md");
+    EXPECT_DOUBLE_EQ(first.score, 0.40);
+    ASSERT_TRUE(first.rerank.has_value());
+    EXPECT_DOUBLE_EQ(first.rerank->lexical_coverage, 1.0);
+    EXPECT_FALSE(first.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(first.rerank->final_score, 1.0);
+    ASSERT_TRUE(first.sparse.has_value());
+    ASSERT_TRUE(first.dense.has_value());
+
+    const rag::RankedPassage& second = reranked.retrieval.passages[1];
+    EXPECT_EQ(second.provenance.path, "a.md");
+    ASSERT_TRUE(second.rerank.has_value());
+    EXPECT_DOUBLE_EQ(second.rerank->lexical_coverage, 0.5);
+    EXPECT_DOUBLE_EQ(second.rerank->final_score, 0.95);
+    ASSERT_TRUE(second.sparse.has_value());
+
+    const rag::RankedPassage& third = reranked.retrieval.passages[2];
+    EXPECT_EQ(third.provenance.path, "b.md");
+    ASSERT_TRUE(third.rerank.has_value());
+    EXPECT_DOUBLE_EQ(third.rerank->lexical_coverage, 0.0);
+    EXPECT_DOUBLE_EQ(third.rerank->final_score, 0.90);
+    ASSERT_TRUE(third.dense.has_value());
+}
+
+TEST(Rerank, ExternalModelEnhancesLocalBaseline) {
+    rag::RetrievalResult input{
+        .passages = {
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "a.md"},
+                .text = "deployment notes",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "b.md"},
+                .text = "harbor tides",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "c.md"},
+                .text = "deployment procedure",
+                .score = 0.40,
+            },
+        },
+        .mode = rag::SearchMode::Hybrid,
+        .corpus_chunk_count = 3,
+    };
+
+    const rag::RerankBackend backend =
+        [](std::string_view,
+           const std::vector<std::string>& passages)
+           -> std::expected<std::vector<double>, std::string> {
+        std::vector<double> scores;
+        scores.reserve(passages.size());
+        for (const std::string& passage : passages) {
+            scores.push_back(passage == "harbor tides" ? 10.0 : 0.0);
+        }
+        return scores;
+    };
+
+    const rag::RerankResult reranked = rag::rerank_passages(
+        "deployment procedure", std::move(input), backend);
+
+    EXPECT_EQ(reranked.report.mode, rag::RerankMode::ModelEnhanced);
+    ASSERT_EQ(reranked.retrieval.passages.size(), 3u);
+
+    const rag::RankedPassage& first = reranked.retrieval.passages[0];
+    EXPECT_EQ(first.provenance.path, "b.md");
+    EXPECT_DOUBLE_EQ(first.score, 0.40);
+    ASSERT_TRUE(first.rerank.has_value());
+    ASSERT_TRUE(first.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(*first.rerank->model_score, 10.0);
+    EXPECT_DOUBLE_EQ(first.rerank->final_score, 0.95);
+
+    const rag::RankedPassage& second = reranked.retrieval.passages[1];
+    EXPECT_EQ(second.provenance.path, "c.md");
+    ASSERT_TRUE(second.rerank.has_value());
+    ASSERT_TRUE(second.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(*second.rerank->model_score, 0.0);
+    EXPECT_DOUBLE_EQ(second.rerank->final_score, 0.50);
+
+    const rag::RankedPassage& third = reranked.retrieval.passages[2];
+    EXPECT_EQ(third.provenance.path, "a.md");
+    ASSERT_TRUE(third.rerank.has_value());
+    ASSERT_TRUE(third.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(*third.rerank->model_score, 0.0);
+    EXPECT_DOUBLE_EQ(third.rerank->final_score, 0.475);
+}
+
+TEST(Rerank, ModelFailureFallsBackToLocalBaseline) {
+    rag::RetrievalResult input{
+        .passages = {
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "a.md"},
+                .text = "deployment notes",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "b.md"},
+                .text = "harbor tides",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "c.md"},
+                .text = "deployment procedure",
+                .score = 0.40,
+            },
+        },
+        .mode = rag::SearchMode::Hybrid,
+        .corpus_chunk_count = 3,
+    };
+
+    const rag::RerankBackend backend =
+        [](std::string_view,
+           const std::vector<std::string>&)
+           -> std::expected<std::vector<double>, std::string> {
+        return std::unexpected(std::string{"reranker unavailable"});
+    };
+
+    const rag::RerankResult reranked = rag::rerank_passages(
+        "deployment procedure", std::move(input), backend);
+
+    EXPECT_EQ(reranked.report.mode, rag::RerankMode::ModelFallback);
+    EXPECT_EQ(reranked.report.backend_error, "reranker unavailable");
+    ASSERT_EQ(reranked.retrieval.passages.size(), 3u);
+
+    const rag::RankedPassage& first = reranked.retrieval.passages[0];
+    EXPECT_EQ(first.provenance.path, "c.md");
+    ASSERT_TRUE(first.rerank.has_value());
+    EXPECT_FALSE(first.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(first.rerank->final_score, 1.0);
+
+    const rag::RankedPassage& second = reranked.retrieval.passages[1];
+    EXPECT_EQ(second.provenance.path, "a.md");
+    ASSERT_TRUE(second.rerank.has_value());
+    EXPECT_FALSE(second.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(second.rerank->final_score, 0.95);
+
+    const rag::RankedPassage& third = reranked.retrieval.passages[2];
+    EXPECT_EQ(third.provenance.path, "b.md");
+    ASSERT_TRUE(third.rerank.has_value());
+    EXPECT_FALSE(third.rerank->model_score.has_value());
+    EXPECT_DOUBLE_EQ(third.rerank->final_score, 0.90);
+}
+
+TEST(Rerank, ModelScoreCountMismatchFallsBackWithoutPartialEnhancement) {
+    rag::RetrievalResult input{
+        .passages = {
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "a.md"},
+                .text = "deployment notes",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "b.md"},
+                .text = "harbor tides",
+                .score = 0.40,
+            },
+            rag::RankedPassage{
+                .provenance = rag::Provenance{.path = "c.md"},
+                .text = "deployment procedure",
+                .score = 0.40,
+            },
+        },
+        .mode = rag::SearchMode::Hybrid,
+        .corpus_chunk_count = 3,
+    };
+
+    const rag::RerankBackend backend =
+        [](std::string_view,
+           const std::vector<std::string>&)
+           -> std::expected<std::vector<double>, std::string> {
+        return std::vector<double>{10.0, 0.0};
+    };
+
+    const rag::RerankResult reranked = rag::rerank_passages(
+        "deployment procedure", std::move(input), backend);
+
+    EXPECT_EQ(reranked.report.mode, rag::RerankMode::ModelFallback);
+    EXPECT_EQ(reranked.report.backend_error,
+              "reranker returned 2 scores for 3 passages");
+    ASSERT_EQ(reranked.retrieval.passages.size(), 3u);
+
+    EXPECT_EQ(reranked.retrieval.passages[0].provenance.path, "c.md");
+    EXPECT_EQ(reranked.retrieval.passages[1].provenance.path, "a.md");
+    EXPECT_EQ(reranked.retrieval.passages[2].provenance.path, "b.md");
+
+    for (const rag::RankedPassage& passage : reranked.retrieval.passages) {
+        ASSERT_TRUE(passage.rerank.has_value());
+        EXPECT_FALSE(passage.rerank->model_score.has_value());
+    }
+    EXPECT_DOUBLE_EQ(reranked.retrieval.passages[0].rerank->final_score, 1.0);
+    EXPECT_DOUBLE_EQ(reranked.retrieval.passages[1].rerank->final_score, 0.95);
+    EXPECT_DOUBLE_EQ(reranked.retrieval.passages[2].rerank->final_score, 0.90);
+}
+
+TEST(Rerank, NonFiniteModelScoreFallsBackWithoutPartialEnhancement) {
+    for (const double invalid_score : {
+             std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity(),
+         }) {
+        SCOPED_TRACE(invalid_score);
+
+        rag::RetrievalResult input{
+            .passages = {
+                rag::RankedPassage{
+                    .provenance = rag::Provenance{.path = "a.md"},
+                    .text = "deployment notes",
+                    .score = 0.40,
+                },
+                rag::RankedPassage{
+                    .provenance = rag::Provenance{.path = "b.md"},
+                    .text = "harbor tides",
+                    .score = 0.40,
+                },
+                rag::RankedPassage{
+                    .provenance = rag::Provenance{.path = "c.md"},
+                    .text = "deployment procedure",
+                    .score = 0.40,
+                },
+            },
+            .mode = rag::SearchMode::Hybrid,
+            .corpus_chunk_count = 3,
+        };
+
+        const rag::RerankBackend backend =
+            [invalid_score](std::string_view,
+                            const std::vector<std::string>&)
+               -> std::expected<std::vector<double>, std::string> {
+            return std::vector<double>{10.0, invalid_score, 0.0};
+        };
+
+        const rag::RerankResult reranked = rag::rerank_passages(
+            "deployment procedure", std::move(input), backend);
+
+        EXPECT_EQ(reranked.report.mode, rag::RerankMode::ModelFallback);
+        EXPECT_EQ(reranked.report.backend_error,
+                  "reranker returned non-finite score at index 1");
+        ASSERT_EQ(reranked.retrieval.passages.size(), 3u);
+
+        EXPECT_EQ(reranked.retrieval.passages[0].provenance.path, "c.md");
+        EXPECT_EQ(reranked.retrieval.passages[1].provenance.path, "a.md");
+        EXPECT_EQ(reranked.retrieval.passages[2].provenance.path, "b.md");
+
+        for (const rag::RankedPassage& passage : reranked.retrieval.passages) {
+            ASSERT_TRUE(passage.rerank.has_value());
+            EXPECT_FALSE(passage.rerank->model_score.has_value());
+        }
+        EXPECT_DOUBLE_EQ(reranked.retrieval.passages[0].rerank->final_score, 1.0);
+        EXPECT_DOUBLE_EQ(reranked.retrieval.passages[1].rerank->final_score, 0.95);
+        EXPECT_DOUBLE_EQ(reranked.retrieval.passages[2].rerank->final_score, 0.90);
+    }
+}
+
+TEST(TeiRerankRequest, CarriesQueryAndOrderedTextsAsValidJson) {
+    const auto body = rag::build_tei_rerank_request_body(
+        "如何部署\"服务\"？", {"先安装\n依赖", "then start\tserver"});
+
+    const auto parsed = nlohmann::json::parse(body);
+    EXPECT_EQ(parsed,
+              nlohmann::json({
+                  {"query", "如何部署\"服务\"？"},
+                  {"texts", {"先安装\n依赖", "then start\tserver"}},
+              }));
+}
+
+TEST(TeiRerankResponse, RestoresScoresToInputPassageOrder) {
+    const auto scores = rag::parse_tei_rerank_response(
+        R"([{"index":2,"score":0.25},{"index":0,"score":0.9},{"index":1,"score":0.4}])",
+        3);
+
+    ASSERT_TRUE(scores.has_value());
+    EXPECT_EQ(*scores, (std::vector<double>{0.9, 0.4, 0.25}));
+}
+
+TEST(TeiRerankResponse, MalformedJsonReturnsErrorInsteadOfThrowing) {
+    const auto result = rag::parse_tei_rerank_response("not json", 2);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(TeiRerankResponse, RejectsStructurallyInvalidOrMisalignedResults) {
+    struct InvalidResponse {
+        std::string_view name;
+        std::string_view body;
+        std::size_t expected_count;
+    };
+
+    const std::vector<InvalidResponse> cases{
+        {"top level is not an array", R"({"index":0,"score":0.9})", 1},
+        {"item is not an object", R"([7])", 1},
+        {"index is missing", R"([{"score":0.9}])", 1},
+        {"score is missing", R"([{"index":0}])", 1},
+        {"index is fractional", R"([{"index":0.5,"score":0.9}])", 1},
+        {"index is negative", R"([{"index":-1,"score":0.9}])", 1},
+        {"score is not numeric", R"([{"index":0,"score":"high"}])", 1},
+        {"index is out of range", R"([{"index":1,"score":0.9}])", 1},
+        {"result count is too small", R"([{"index":0,"score":0.9}])", 2},
+        {"index is duplicated",
+         R"([{"index":0,"score":0.9},{"index":0,"score":0.8}])", 2},
+        {"score overflows double", R"([{"index":0,"score":1e999}])", 1},
+    };
+
+    for (const InvalidResponse& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        std::expected<std::vector<double>, std::string> result =
+            std::vector<double>{};
+
+        EXPECT_NO_THROW(result = rag::parse_tei_rerank_response(
+                            test_case.body, test_case.expected_count));
+        EXPECT_FALSE(result.has_value());
+    }
+}
+
+TEST(TeiRerankBackend, PostsConfiguredRequestAndReturnsAlignedScores) {
+    std::string seen_host;
+    int seen_port = 0;
+    int seen_timeout_ms = 0;
+    std::string seen_body;
+
+    const rag::TeiRerankTransport transport =
+        [&](const rag::TeiRerankConfig& config, std::string_view body)
+            -> std::expected<std::string, std::string> {
+        seen_host = config.host;
+        seen_port = config.port;
+        seen_timeout_ms = config.timeout_ms;
+        seen_body = body;
+        return R"([{"index":1,"score":0.8},{"index":0,"score":0.2}])";
+    };
+
+    const rag::RerankBackend backend = rag::make_tei_rerank_backend(
+        rag::TeiRerankConfig{
+            .host = "rerank.test",
+            .port = 9090,
+            .timeout_ms = 1200,
+        },
+        transport);
+
+    const auto scores = backend("deployment guide", {"first", "second"});
+
+    ASSERT_TRUE(scores.has_value());
+    EXPECT_EQ(*scores, (std::vector<double>{0.2, 0.8}));
+    EXPECT_EQ(seen_host, "rerank.test");
+    EXPECT_EQ(seen_port, 9090);
+    EXPECT_EQ(seen_timeout_ms, 1200);
+    EXPECT_EQ(nlohmann::json::parse(seen_body),
+              nlohmann::json({
+                  {"query", "deployment guide"},
+                  {"texts", {"first", "second"}},
+              }));
+}
+
+TEST(TeiRerankBackend, SkipsEmptyBatchAndReturnsBoundaryErrors) {
+    int transport_calls = 0;
+    const rag::TeiRerankTransport failing_transport =
+        [&](const rag::TeiRerankConfig&, std::string_view)
+            -> std::expected<std::string, std::string> {
+        ++transport_calls;
+        return std::unexpected(std::string{"connection refused"});
+    };
+    const rag::RerankBackend unavailable = rag::make_tei_rerank_backend(
+        rag::TeiRerankConfig{}, failing_transport);
+
+    const auto empty = unavailable("query", {});
+    ASSERT_TRUE(empty.has_value());
+    EXPECT_TRUE(empty->empty());
+    EXPECT_EQ(transport_calls, 0);
+
+    const auto transport_error = unavailable("query", {"passage"});
+    ASSERT_FALSE(transport_error.has_value());
+    EXPECT_EQ(transport_error.error(), "connection refused");
+    EXPECT_EQ(transport_calls, 1);
+
+    const rag::RerankBackend invalid_response = rag::make_tei_rerank_backend(
+        rag::TeiRerankConfig{},
+        [](const rag::TeiRerankConfig&, std::string_view)
+            -> std::expected<std::string, std::string> {
+            return std::string{"not json"};
+        });
+    const auto protocol_error = invalid_response("query", {"passage"});
+    EXPECT_FALSE(protocol_error.has_value());
 }
 
 // ── 切片 #42：Corpus 目录建库 + 增量缓存 ─────────────────────────────────
@@ -1005,9 +1586,10 @@ std::vector<std::string> expected_doc_inputs(const std::string& path,
     return out;
 }
 
-std::string chunk_key(const rag::Chunk& c) {
-    return c.path + ":" + std::to_string(c.line_start) + "-"
-         + std::to_string(c.line_end);
+std::string passage_key(const rag::RankedPassage& passage) {
+    return passage.provenance.path + ":"
+         + std::to_string(passage.provenance.line_start) + "-"
+         + std::to_string(passage.provenance.line_end);
 }
 
 const char* kDocA =
@@ -1046,7 +1628,7 @@ TEST(CorpusBuild, MissingOrEmptyRootGivesEmptyCorpus) {
     EXPECT_EQ(stats.files_seen, 0u);
     EXPECT_EQ(c.chunk_count(), 0u);
     EXPECT_FALSE(c.has_embeddings());
-    EXPECT_TRUE(c.search("anything", be.fn(), cfg, 3).hits.empty());
+    EXPECT_TRUE(c.retrieve("anything", be.fn(), cfg, 3).passages.empty());
 
     // 空目录同语义
     TempDir dir;
@@ -1054,7 +1636,7 @@ TEST(CorpusBuild, MissingOrEmptyRootGivesEmptyCorpus) {
     const auto stats2 = c2.build(dir.path(), be.fn(), cfg);
     EXPECT_EQ(stats2.files_seen, 0u);
     EXPECT_EQ(c2.chunk_count(), 0u);
-    EXPECT_TRUE(c2.search("anything", be.fn(), cfg, 3).hits.empty());
+    EXPECT_TRUE(c2.retrieve("anything", be.fn(), cfg, 3).passages.empty());
 
     EXPECT_EQ(be.calls, 0u);   // 空语料一次都不嵌
 }
@@ -1085,17 +1667,17 @@ TEST(CorpusBuild, BuildsRecursesAndFiltersThenSearches) {
             << "非相对路径: " << ch.path;
 
     // 主题词唯一 → 首命中即正确文档
-    const auto ha = c.search("zephyr", be.fn(), cfg, 3);
-    ASSERT_FALSE(ha.hits.empty());
-    EXPECT_EQ(c.chunks()[ha.hits[0].first].path, "a.md");
-    const auto hc = c.search("quartz", be.fn(), cfg, 3);
-    ASSERT_FALSE(hc.hits.empty());
-    EXPECT_EQ(c.chunks()[hc.hits[0].first].path, "sub/c.md");
+    const auto ha = c.retrieve("zephyr", be.fn(), cfg, 3);
+    ASSERT_FALSE(ha.passages.empty());
+    EXPECT_EQ(ha.passages[0].provenance.path, "a.md");
+    const auto hc = c.retrieve("quartz", be.fn(), cfg, 3);
+    ASSERT_FALSE(hc.passages.empty());
+    EXPECT_EQ(hc.passages[0].provenance.path, "sub/c.md");
 
     // .txt 里的词在词法路上检索不到（未配模型 → 恒等降级 bm25_search，
     // 空 BM25 命中 = 干净的扩展名过滤证据）
     const rag::EmbedConfig bm25_cfg{};
-    EXPECT_TRUE(c.search("harbor", be.fn(), bm25_cfg, 3).hits.empty());
+    EXPECT_TRUE(c.retrieve("harbor", be.fn(), bm25_cfg, 3).passages.empty());
 }
 
 TEST(CorpusCache, SecondBuildHitsCacheWithZeroEmbeds) {
@@ -1128,12 +1710,11 @@ TEST(CorpusCache, SecondBuildHitsCacheWithZeroEmbeds) {
 
     // 缓存搬运没腐坏：同查询首命中同一块（按块身份比，不比 id）
     for (const char* q : {"zephyr", "harbor"}) {
-        const auto h1 = first.search(q, be1.fn(), cfg, 3);
-        const auto h2 = second.search(q, be2.fn(), cfg, 3);
-        ASSERT_FALSE(h1.hits.empty());
-        ASSERT_FALSE(h2.hits.empty());
-        EXPECT_EQ(chunk_key(first.chunks()[h1.hits[0].first]),
-                  chunk_key(second.chunks()[h2.hits[0].first]));
+        const auto h1 = first.retrieve(q, be1.fn(), cfg, 3);
+        const auto h2 = second.retrieve(q, be2.fn(), cfg, 3);
+        ASSERT_FALSE(h1.passages.empty());
+        ASSERT_FALSE(h2.passages.empty());
+        EXPECT_EQ(passage_key(h1.passages[0]), passage_key(h2.passages[0]));
     }
 }
 
@@ -1172,9 +1753,9 @@ TEST(CorpusCache, ChangedFileReembedsOnlyThatFile) {
     EXPECT_EQ(s2.chunks_embedded, expected.size());
 
     // 变更后的内容可检索（重建不是空转）
-    const auto hits = second.search("lighthouse", be2.fn(), cfg, 3);
-    ASSERT_FALSE(hits.hits.empty());
-    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "b.md");
+    const auto hits = second.retrieve("lighthouse", be2.fn(), cfg, 3);
+    ASSERT_FALSE(hits.passages.empty());
+    EXPECT_EQ(hits.passages[0].provenance.path, "b.md");
 }
 
 TEST(CorpusCache, DeletedFileDropsItsChunks) {
@@ -1267,9 +1848,9 @@ TEST(CorpusCache, ChunkerIdentityMismatchInvalidatesAll) {
     EXPECT_EQ(s2.chunks_embedded, total);
     ASSERT_TRUE(s2.dense_ok);
     EXPECT_EQ(second.chunk_count(), total);  // 内容照常正确
-    const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
-    ASSERT_FALSE(hits.hits.empty());
-    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
+    const auto hits = second.retrieve("zephyr", be2.fn(), cfg, 3);
+    ASSERT_FALSE(hits.passages.empty());
+    EXPECT_EQ(hits.passages[0].provenance.path, "a.md");
 }
 
 TEST(CorpusCache, CorruptCacheSilentlyRebuilds) {
@@ -1303,9 +1884,9 @@ TEST(CorpusCache, CorruptCacheSilentlyRebuilds) {
         EXPECT_EQ(s2.chunks_embedded, total);
         ASSERT_TRUE(s2.dense_ok);
         EXPECT_EQ(second.chunk_count(), total);
-        const auto hits = second.search("zephyr", be2.fn(), cfg, 3);
-        ASSERT_FALSE(hits.hits.empty());
-        EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
+        const auto hits = second.retrieve("zephyr", be2.fn(), cfg, 3);
+        ASSERT_FALSE(hits.passages.empty());
+        EXPECT_EQ(hits.passages[0].provenance.path, "a.md");
     }
 }
 
@@ -1329,9 +1910,9 @@ TEST(CorpusBuild, EmbedFailureDegradesToBm25AndKeepsCache) {
     EXPECT_FALSE(s2.dense_ok);               // 降级 BM25-only（不是错误）
     EXPECT_FALSE(second.has_embeddings());   // 不交半截 dense
     ASSERT_GT(second.chunk_count(), 0u);     // 块照常在，检索走词法路
-    const auto hits = second.search("zephyr", be_fail.fn(), cfg, 3);
-    ASSERT_FALSE(hits.hits.empty());
-    EXPECT_EQ(second.chunks()[hits.hits[0].first].path, "a.md");
+    const auto hits = second.retrieve("zephyr", be_fail.fn(), cfg, 3);
+    ASSERT_FALSE(hits.passages.empty());
+    EXPECT_EQ(hits.passages[0].provenance.path, "a.md");
 
     // 失败会话不写缓存：旧缓存（a.md 带向量）原样保留 → 下次好后端
     // build 时 a.md 零嵌入。若失败会话写了无向量缓存，a.md 也会被重嵌，
@@ -1400,12 +1981,12 @@ TEST(CorpusBuild, FromMemoryMatchesFolderBuild) {
     // 检索行为一致：同查询命中序列按块身份逐一对应（chunk id 依赖
     // 遍历顺序，不能直接比 id）
     for (const char* q : {"zephyr", "harbor", "installer"}) {
-        const auto h1 = from_dir.search(q, be1.fn(), cfg, 3);
-        const auto h2 = from_mem.search(q, be2.fn(), cfg, 3);
-        ASSERT_EQ(h1.hits.size(), h2.hits.size());
-        for (std::size_t i = 0; i < h1.hits.size(); ++i)
-            EXPECT_EQ(chunk_key(from_dir.chunks()[h1.hits[i].first]),
-                      chunk_key(from_mem.chunks()[h2.hits[i].first]))
+        const auto h1 = from_dir.retrieve(q, be1.fn(), cfg, 3);
+        const auto h2 = from_mem.retrieve(q, be2.fn(), cfg, 3);
+        ASSERT_EQ(h1.passages.size(), h2.passages.size());
+        for (std::size_t i = 0; i < h1.passages.size(); ++i)
+            EXPECT_EQ(passage_key(h1.passages[i]),
+                      passage_key(h2.passages[i]))
                 << "query=" << q << " rank=" << i;
     }
 }

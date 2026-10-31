@@ -11,12 +11,12 @@
 namespace {
 
 // 把 decoder 投出的 Msg 收集起来，便于对序列做断言。
-std::vector<my_agent::Msg> decode_all(const std::vector<std::string_view>& chunks)
+std::vector<my_agent::ProviderEvent> decode_all(const std::vector<std::string_view>& chunks)
 {
     my_agent::provider::ollama::StreamDecoder decoder;
-    std::vector<my_agent::Msg> collected;
+    std::vector<my_agent::ProviderEvent> collected;
 
-    const my_agent::EventSink sink = [&collected](my_agent::Msg msg) {
+    const my_agent::ProviderEventSink sink = [&collected](my_agent::ProviderEvent msg) {
         collected.push_back(std::move(msg));
     };
 
@@ -33,7 +33,7 @@ std::vector<my_agent::Msg> decode_all(const std::vector<std::string_view>& chunk
 // Red 原因：仓库尚不存在 StreamDecoder（编译错误）。
 TEST(OllamaTransportTest, MapsTextFrameToStreamTextDelta)
 {
-    const std::vector<my_agent::Msg> msgs = decode_all({
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
         R"({"message":{"role":"assistant","content":"Hello"},"done":false})"
         "\n",
     });
@@ -50,7 +50,7 @@ TEST(OllamaTransportTest, MapsTextFrameToStreamTextDelta)
 // Red 原因：无跨切片缓冲时，被切碎的行会解析失败从而丢事件。
 TEST(OllamaTransportTest, ReassemblesFramesSplitAcrossChunkBoundaries)
 {
-    const std::vector<my_agent::Msg> msgs = decode_all({
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
         R"({"message":{"content":"po"},"do)",
         "ne\":false}\n{\"message\":{\"content\":\"ng\"},\"done\":false}\n",
     });
@@ -77,7 +77,7 @@ TEST(OllamaTransportTest, ReassemblesFramesSplitAcrossChunkBoundaries)
 //    "arguments":{"operation":"multiply","left":6,"right":7}}}]},"done":false}
 TEST(OllamaTransportTest, MapsAtomicToolCallFrameToStreamToolCall)
 {
-    const std::vector<my_agent::Msg> msgs = decode_all({
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
         R"({"message":{"role":"assistant","content":"","tool_calls":[)"
         R"({"id":"call_jwze9vg9","function":{"index":0,"name":"calculator",)"
         R"("arguments":{"operation":"multiply","left":6,"right":7}}}]},)"
@@ -98,24 +98,62 @@ TEST(OllamaTransportTest, MapsAtomicToolCallFrameToStreamToolCall)
 // 场景：终态帧。
 // 领域语义：done==true 是回合终点，映射成 StreamFinished。它同时携带一个空的
 // content，不应该额外投出一个空的 StreamTextDelta —— 那会在 Model 里留下噪声。
-TEST(OllamaTransportTest, MapsDoneFrameToStreamFinishedWithoutEmptyDelta)
+TEST(OllamaTransportTest, MapsDoneFrameWithoutUsageToFinishedWithoutEmptyDelta)
 {
-    const std::vector<my_agent::Msg> msgs = decode_all({
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
         R"({"message":{"role":"assistant","content":""},"done":true,)"
         R"("done_reason":"stop","eval_count":36})"
         "\n",
     });
 
     ASSERT_EQ(std::size_t{1}, msgs.size());
-    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(msgs.front()));
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(msgs.at(0)));
+}
+
+TEST(OllamaTransportTest, PublishesNormalizedUsageBeforeStreamFinished)
+{
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
+        R"({"message":{"role":"assistant","content":""},"done":true,)"
+        R"("prompt_eval_count":128,"prompt_eval_cached_count":7,)"
+        R"("eval_count":36})"
+        "\n",
+    });
+
+    ASSERT_EQ(std::size_t{2}, msgs.size());
+    const auto* usage = std::get_if<my_agent::RequestUsage>(&msgs.at(0));
+    ASSERT_NE(nullptr, usage);
+    EXPECT_EQ(128u, usage->input_tokens);
+    ASSERT_TRUE(usage->cached_input_tokens.has_value());
+    EXPECT_EQ(7u, *usage->cached_input_tokens);
+    EXPECT_EQ(36u, usage->output_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Exact, usage->quality);
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(msgs.at(1)));
+}
+
+TEST(OllamaTransportTest, NormalizesContextSizeErrorAsContextLimit)
+{
+    const std::vector<my_agent::ProviderEvent> msgs = decode_all({
+        R"({"error":"the request exceeds the available context size"})"
+        "\n",
+    });
+
+    ASSERT_EQ(std::size_t{1}, msgs.size());
+    const auto* error = std::get_if<my_agent::StreamError>(&msgs.front());
+    ASSERT_NE(nullptr, error);
+    ASSERT_TRUE(error->provider_error.has_value());
+    EXPECT_EQ(
+        my_agent::ProviderErrorKind::ContextLimit,
+        error->provider_error->kind
+    );
+    EXPECT_EQ("the request exceeds the available context size", error->message);
 }
 
 TEST(OllamaTransportTest, PublishesEvalStatsForTheStatusBar)
 {
     const auto stats = std::make_shared<my_agent::provider::ollama::StreamStats>();
     my_agent::provider::ollama::StreamDecoder decoder{stats};
-    std::vector<my_agent::Msg> msgs;
-    const my_agent::EventSink sink = [&msgs](my_agent::Msg msg) {
+    std::vector<my_agent::ProviderEvent> msgs;
+    const my_agent::ProviderEventSink sink = [&msgs](my_agent::ProviderEvent msg) {
         msgs.push_back(std::move(msg));
     };
 
@@ -127,13 +165,18 @@ TEST(OllamaTransportTest, PublishesEvalStatsForTheStatusBar)
         sink
     );
 
-    ASSERT_EQ(std::size_t{1}, msgs.size());
+    ASSERT_EQ(std::size_t{2}, msgs.size());
     const my_agent::provider::ollama::StreamStats::Snapshot snapshot =
         stats->snapshot();
     EXPECT_EQ(128u, snapshot.prompt_eval_count);
     EXPECT_EQ(36u, snapshot.eval_count);
     EXPECT_EQ(3.0, snapshot.eval_duration_seconds);
     EXPECT_EQ(12.0, snapshot.tokens_per_second);
+    EXPECT_EQ(1u, snapshot.generation);
+    const auto* usage = std::get_if<my_agent::RequestUsage>(&msgs.at(0));
+    ASSERT_NE(nullptr, usage);
+    EXPECT_FALSE(usage->cached_input_tokens.has_value());
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(msgs.at(1)));
 }
 
 // 场景：把一段带已完成工具调用的历史编成出站请求。
@@ -251,6 +294,48 @@ TEST(OllamaTransportTest, EncodesToolSpecsAsFunctionDeclarations)
     );
 }
 
+TEST(OllamaTransportTest, SendsConfiguredContextLimitAsNumCtx)
+{
+    my_agent::Request request;
+    request.messages = {
+        my_agent::Message{.role = my_agent::Role::User, .text = "hello"},
+    };
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::ollama::build_request_body(
+            "qwen3.5:latest", request, 4096)
+    );
+
+    ASSERT_TRUE(body.contains("options"));
+    EXPECT_EQ(4096u, body.at("options").at("num_ctx").get<std::size_t>());
+}
+
+TEST(OllamaTransportTest, SendsCompactionOutputBudgetAsNumPredict)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 777;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::ollama::build_request_body(
+            "qwen3.5:latest", request));
+
+    EXPECT_EQ(777u, body.at("options").at("num_predict")
+        .get<std::uint64_t>());
+}
+
+TEST(OllamaTransportTest, SendsNormalOutputCapAsNumPredict)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 2048;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::ollama::build_request_body(
+            "qwen3.5:latest", request));
+
+    EXPECT_EQ(2048u, body.at("options").at("num_predict")
+        .get<std::uint64_t>());
+}
+
 // ── 集成测试 ──────────────────────────────────────────────────────────────
 // 以下测试打真实的 Ollama。11434 不可达时 skip 而不是失败 —— 这条边界让 CI 和
 // 没装 Ollama 的机器仍然能跑全套测试。
@@ -308,7 +393,7 @@ TEST(OllamaIntegrationTest, StreamsRealTextTurnEndingInExactlyOneFinished)
     int finished = 0;
     int errors = 0;
 
-    stream(request, [&](my_agent::Msg msg) {
+    stream(request, [&](my_agent::ProviderEvent msg) {
         if (const auto* delta = std::get_if<my_agent::StreamTextDelta>(&msg)) {
             text += delta->text;
         } else if (std::holds_alternative<my_agent::StreamFinished>(msg)) {
@@ -368,7 +453,7 @@ TEST(OllamaIntegrationTest, ReceivesCompleteToolCallInASingleEvent)
     std::vector<my_agent::StreamToolCall> calls;
     int finished = 0;
 
-    stream(request, [&](my_agent::Msg msg) {
+    stream(request, [&](my_agent::ProviderEvent msg) {
         if (const auto* call = std::get_if<my_agent::StreamToolCall>(&msg)) {
             calls.push_back(*call);
         } else if (std::holds_alternative<my_agent::StreamFinished>(msg)) {
@@ -414,7 +499,7 @@ TEST(OllamaIntegrationTest, ReportsUnknownModelAsStreamError)
     int errors = 0;
     int finished = 0;
 
-    stream(request, [&](my_agent::Msg msg) {
+    stream(request, [&](my_agent::ProviderEvent msg) {
         if (std::holds_alternative<my_agent::StreamError>(msg)) {
             ++errors;
         } else if (std::holds_alternative<my_agent::StreamFinished>(msg)) {

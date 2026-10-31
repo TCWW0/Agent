@@ -9,7 +9,7 @@
 TEST(ProfileTest, SetProfileImmediatelyUpdatesCurrentSession)
 {
     my_agent::Model model{};
-    EXPECT_EQ(my_agent::Profile::Write, model.profile);
+    EXPECT_EQ(my_agent::Profile::Write, model.domain.profile);
 
     const my_agent::Step step = my_agent::update(
         std::move(model),
@@ -20,6 +20,6 @@ TEST(ProfileTest, SetProfileImmediatelyUpdatesCurrentSession)
         }
     );
 
-    EXPECT_EQ(my_agent::Profile::Ask, step.model.profile);
+    EXPECT_EQ(my_agent::Profile::Ask, step.model.domain.profile);
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(step.cmd));
 }

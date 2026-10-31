@@ -1,6 +1,5 @@
 #include "my_agent/runtime/wake_signal.hpp"
 
-#include <cerrno>
 #include <cstdint>
 
 #include <fcntl.h>

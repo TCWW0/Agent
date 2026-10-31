@@ -1,68 +1,97 @@
 #include "my_agent/ui/status_bar.hpp"
+#include "my_agent/runtime/model.hpp"
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <string>
-
-namespace {
-
-const my_agent::ui::StatusSegment& segment_named(
-    const my_agent::ui::StatusBar& bar,
-    my_agent::ui::StatusSegmentKind kind
-)
+TEST(StatusBarTest, MissingFinalUsageRemainsUnavailable)
 {
-    const auto found = std::find_if(
-        bar.segments.begin(),
-        bar.segments.end(),
-        [kind](const my_agent::ui::StatusSegment& segment) {
-            return segment.kind == kind;
-        }
-    );
-    EXPECT_NE(found, bar.segments.end());
-    return *found;
-}
+    my_agent::Model model;
+    model.session.usage.turn = my_agent::TurnUsageState{
+        .turn_id = my_agent::TurnId{1},
+    };
 
-}  // namespace
-
-TEST(StatusBarTest, KeepsActivityLastAndUsesTheFixedDegradationRanking)
-{
-    const my_agent::ui::StatusBar bar = my_agent::ui::build_status_bar({
-        .phase = my_agent::ui::StatusPhase::Streaming,
-        .tool_name = {},
-        .model_name = "qwen3.5:latest",
-        .context_used = 4096,
+    const auto status = my_agent::ui::project_model_usage(model, {
         .context_limit = 8192,
-        .tokens_per_second = 12.5,
-        .elapsed_seconds = 3.25,
     });
 
-    const auto& throughput = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::Throughput
-    );
-    const auto& elapsed = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::Elapsed
-    );
-    const auto& model = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::Model
-    );
-    const auto& context_bar = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::ContextBar
-    );
-    const auto& context_count = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::ContextCount
-    );
-    const auto& activity = segment_named(
-        bar, my_agent::ui::StatusSegmentKind::Activity
-    );
-
-    EXPECT_LT(throughput.keep, elapsed.keep);
-    EXPECT_LT(elapsed.keep, model.keep);
-    EXPECT_LT(model.keep, context_bar.keep);
-    EXPECT_LT(context_bar.keep, context_count.keep);
-    EXPECT_TRUE(activity.always);
-    EXPECT_NE(std::string::npos, activity.text.find("thinking"));
-    EXPECT_NE(std::string::npos, throughput.text.find("12.5"));
-    EXPECT_NE(std::string::npos, context_count.text.find("4096"));
+    EXPECT_EQ(my_agent::UsageQuality::Unavailable, status.turn_quality);
+    EXPECT_EQ(my_agent::UsageQuality::Unavailable, status.context_quality);
+    EXPECT_FALSE(status.observed_context_tokens.has_value());
 }
 
+TEST(StatusBarTest, BlockedEstimateDoesNotReplaceObservedContext)
+{
+    my_agent::Model model;
+    model.phase = my_agent::Blocked{
+        .reason = my_agent::BlockReason::ContextLimit,
+        .budget = my_agent::ContextBudgetAssessment{
+            .projected_input_tokens = 8120,
+            .hard_input_limit = 7040,
+            .estimated = true,
+        },
+    };
+    model.session.usage.observed_context = my_agent::UsageObservation{
+        .totals = my_agent::UsageTotals{
+            .input_tokens = 12,
+            .output_tokens = 3,
+        },
+        .quality = my_agent::UsageQuality::Exact,
+    };
+
+    const auto status = my_agent::ui::project_model_usage(model, {
+        .context_limit = 8192,
+        .observed_context_tokens = 999,
+    });
+
+    EXPECT_EQ(15U, status.observed_context_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Exact, status.context_quality);
+}
+
+TEST(StatusBarTest, RequestAndTurnUsageKeepTheirOwnQualities)
+{
+    my_agent::Model model;
+    model.session.usage.latest_request = my_agent::UsageObservation{
+        .totals = my_agent::UsageTotals{
+            .input_tokens = 100,
+            .output_tokens = 20,
+        },
+        .quality = my_agent::UsageQuality::Exact,
+    };
+    model.session.usage.turn = my_agent::TurnUsageState{
+        .turn_id = my_agent::TurnId{1},
+        .totals = my_agent::UsageTotals{
+            .input_tokens = 150,
+            .output_tokens = 30,
+        },
+    };
+
+    const auto status = my_agent::ui::project_model_usage(model, {});
+
+    EXPECT_EQ(100U, status.request_input_tokens);
+    EXPECT_EQ(20U, status.request_output_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Exact, status.request_quality);
+    EXPECT_EQ(150U, status.turn_input_tokens);
+    EXPECT_EQ(30U, status.turn_output_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Unavailable, status.turn_quality);
+}
+
+TEST(StatusBarTest, LastAndStaleContextRemainDistinguishable)
+{
+    my_agent::Model model;
+    model.session.usage.observed_context = my_agent::UsageObservation{
+        .totals = my_agent::UsageTotals{
+            .input_tokens = 128,
+            .output_tokens = 36,
+        },
+        .quality = my_agent::UsageQuality::Last,
+    };
+
+    const auto last = my_agent::ui::project_model_usage(model, {});
+    EXPECT_EQ(164U, last.observed_context_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Last, last.context_quality);
+
+    model.session.usage.observed_context->quality = my_agent::UsageQuality::Stale;
+    const auto stale = my_agent::ui::project_model_usage(model, {});
+    EXPECT_EQ(164U, stale.observed_context_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Stale, stale.context_quality);
+}

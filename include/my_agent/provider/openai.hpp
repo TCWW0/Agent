@@ -23,7 +23,9 @@ namespace my_agent::provider::openai {
 // 没有「块结束」事件可依赖，所以工具调用只能在 finish_reason 到达时统一发出。
 class StreamDecoder {
 public:
-    void feed(std::string_view chunk, const EventSink& sink);
+    void feed(std::string_view chunk, const ProviderEventSink& sink);
+    void finish(const ProviderEventSink& sink);
+    [[nodiscard]] bool terminal_emitted() const noexcept;
 
 private:
     struct ToolAccumulator {
@@ -32,13 +34,16 @@ private:
         std::string arguments;  // 序列化 JSON 文本，逐片累积
     };
 
-    void handle_event(const sse::Event& event, const EventSink& sink);
-    void flush_tool_calls(const EventSink& sink);
+    void handle_event(const sse::Event& event, const ProviderEventSink& sink);
+    void emit_usage(const nlohmann::json& usage, const ProviderEventSink& sink);
+    void flush_tool_calls(const ProviderEventSink& sink);
 
     sse::FrameAssembler assembler_;
 
     // map 而非 unordered_map：按 index 有序发出，工具调用顺序才是确定的。
     std::map<int, ToolAccumulator> tools_;
+    bool finish_seen_{false};
+    bool usage_emitted_{false};
     bool finished_{false};
 };
 

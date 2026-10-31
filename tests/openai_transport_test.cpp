@@ -12,12 +12,12 @@
 
 namespace {
 
-std::vector<my_agent::Msg> decode(const std::vector<std::string>& chunks)
+std::vector<my_agent::ProviderEvent> decode(const std::vector<std::string>& chunks)
 {
     my_agent::provider::openai::StreamDecoder decoder;
-    std::vector<my_agent::Msg> messages;
+    std::vector<my_agent::ProviderEvent> messages;
 
-    my_agent::EventSink sink = [&messages](my_agent::Msg msg) {
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
         messages.push_back(std::move(msg));
     };
 
@@ -37,7 +37,7 @@ std::vector<my_agent::Msg> decode(const std::vector<std::string>& chunks)
 // Red 原因：仓库尚无 openai.cpp，StreamDecoder::feed 无定义。
 TEST(OpenaiStreamDecoderTest, AccumulatesInterleavedToolCallsByIndexAndFlushesInOrder)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_a\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
 
@@ -84,7 +84,7 @@ TEST(OpenaiStreamDecoderTest, AccumulatesInterleavedToolCallsByIndexAndFlushesIn
 // 收尾信号，但宿主要求「恰好一个终态事件」，所以第二个必须被吞掉。
 TEST(OpenaiStreamDecoderTest, StreamsTextAndEmitsExactlyOneTerminalEvent)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\","
         "\"content\":\"\"}}]}\n\n",
 
@@ -101,11 +101,116 @@ TEST(OpenaiStreamDecoderTest, StreamsTextAndEmitsExactlyOneTerminalEvent)
     EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(2)));
 }
 
+TEST(OpenaiStreamDecoderTest, PublishesUsageBeforeTerminalWhenUsageOnlyChunkFollowsFinish)
+{
+    const std::vector<my_agent::ProviderEvent> messages = decode({
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},"
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":128,"
+        "\"completion_tokens\":36,\"total_tokens\":164,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":7}}}\n\n",
+        "data: [DONE]\n\n",
+    });
+
+    ASSERT_EQ(std::size_t{2}, messages.size());
+    const auto* usage = std::get_if<my_agent::RequestUsage>(&messages.at(0));
+    ASSERT_NE(nullptr, usage);
+    EXPECT_EQ(128u, usage->input_tokens);
+    ASSERT_TRUE(usage->cached_input_tokens.has_value());
+    EXPECT_EQ(7u, *usage->cached_input_tokens);
+    EXPECT_EQ(36u, usage->output_tokens);
+    EXPECT_EQ(my_agent::UsageQuality::Exact, usage->quality);
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(1)));
+}
+
+TEST(OpenaiStreamDecoderTest, CompletesAtHttpEofWhenDoneSentinelIsMissing)
+{
+    my_agent::provider::openai::StreamDecoder decoder;
+    std::vector<my_agent::ProviderEvent> messages;
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
+        messages.push_back(std::move(msg));
+    };
+
+    decoder.feed(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,"
+        "\"completion_tokens\":3}}\n\n",
+        sink);
+    decoder.finish(sink);
+    decoder.finish(sink);
+
+    ASSERT_EQ(std::size_t{2}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::RequestUsage>(messages.at(0)));
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.at(1)));
+}
+
+TEST(OpenaiStreamDecoderTest, IgnoresLateFramesAfterTerminal)
+{
+    my_agent::provider::openai::StreamDecoder decoder;
+    std::vector<my_agent::ProviderEvent> messages;
+    my_agent::ProviderEventSink sink = [&messages](my_agent::ProviderEvent msg) {
+        messages.push_back(std::move(msg));
+    };
+
+    decoder.feed("data: [DONE]\n\n", sink);
+    decoder.feed(
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,"
+        "\"completion_tokens\":3}}\n\n",
+        sink);
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.front()));
+}
+
+TEST(OpenaiStreamDecoderTest, IgnoresMalformedFrameAndStillFinishes)
+{
+    const std::vector<my_agent::ProviderEvent> messages = decode({
+        "data: {not-json}\n\n",
+        "data: [DONE]\n\n",
+    });
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::StreamFinished>(messages.front()));
+}
+
+TEST(OpenaiRequestTest, RequestsUsageInStreamingChatCompletions)
+{
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::openai::build_request_body(
+            "gpt-4o", my_agent::Request{}));
+
+    ASSERT_TRUE(body.contains("stream_options"));
+    EXPECT_TRUE(body.at("stream_options").at("include_usage").get<bool>());
+}
+
+TEST(OpenaiRequestTest, SendsCompactionOutputBudgetToChatCompletions)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 777;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::openai::build_request_body("gpt-4o", request));
+
+    EXPECT_EQ(777u, body.at("max_tokens").get<std::uint64_t>());
+}
+
+TEST(OpenaiRequestTest, SendsNormalOutputCapToChatCompletions)
+{
+    my_agent::Request request;
+    request.max_output_tokens = 2048;
+
+    const nlohmann::json body = nlohmann::json::parse(
+        my_agent::provider::openai::build_request_body("gpt-4o", request));
+
+    EXPECT_EQ(2048u, body.at("max_tokens").get<std::uint64_t>());
+}
+
 // 场景：流里只有 data: [DONE]，没有 finish_reason（部分兼容实现如此）。
 // 领域语义：[DONE] 单独也必须能收尾，否则 owner 会永久停在 Streaming 上。
 TEST(OpenaiStreamDecoderTest, FinishesOnDoneSentinelAlone)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
         "data: [DONE]\n\n",
     });
@@ -118,7 +223,7 @@ TEST(OpenaiStreamDecoderTest, FinishesOnDoneSentinelAlone)
 // 领域语义：与 Anthropic 同理，错误也是终态，折成 StreamError 让回合可见地结束。
 TEST(OpenaiStreamDecoderTest, ConvertsErrorPayloadIntoStreamError)
 {
-    const std::vector<my_agent::Msg> messages = decode({
+    const std::vector<my_agent::ProviderEvent> messages = decode({
         "data: {\"error\":{\"message\":\"context_length_exceeded\"}}\n\n",
     });
 
@@ -126,6 +231,34 @@ TEST(OpenaiStreamDecoderTest, ConvertsErrorPayloadIntoStreamError)
     const auto* error = std::get_if<my_agent::StreamError>(&messages.front());
     ASSERT_NE(nullptr, error);
     EXPECT_EQ("context_length_exceeded", error->message);
+    ASSERT_TRUE(error->provider_error.has_value());
+    EXPECT_EQ(
+        my_agent::ProviderErrorKind::ContextLimit,
+        error->provider_error->kind
+    );
+}
+
+TEST(OpenaiStreamDecoderTest, NormalizesContextLimitErrorWithProviderMetadata)
+{
+    const std::vector<my_agent::ProviderEvent> messages = decode({
+        "data: {\"error\":{\"message\":\"This model's maximum context "
+        "length is 4096 tokens\",\"type\":\"invalid_request_error\","
+        "\"code\":\"context_length_exceeded\"}}\n\n",
+    });
+
+    ASSERT_EQ(std::size_t{1}, messages.size());
+    const auto* error = std::get_if<my_agent::StreamError>(&messages.front());
+    ASSERT_NE(nullptr, error);
+    ASSERT_TRUE(error->provider_error.has_value());
+    EXPECT_EQ(
+        my_agent::ProviderErrorKind::ContextLimit,
+        error->provider_error->kind
+    );
+    EXPECT_EQ("context_length_exceeded", error->provider_error->code);
+    EXPECT_EQ(
+        "This model's maximum context length is 4096 tokens",
+        error->message
+    );
 }
 
 // 场景：带系统提示与工具表的一次请求。

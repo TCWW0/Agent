@@ -330,7 +330,8 @@ void VirtualTerminal::apply_csi(std::string_view params, char final_byte)
         return value;
     };
 
-    // 私有模式：?7 是 DECAWM，?1049 是备用屏，?25 是光标可见性。
+    // 私有模式：?7 是 DECAWM，?1049 是备用屏，?25 是光标可见性；
+    // ?1000/?1006 是鼠标报告，?2004 是 bracketed paste，都不影响画面记账。
     if (!params.empty() && params.front() == '?'
         && (final_byte == 'h' || final_byte == 'l')) {
         const bool set = final_byte == 'h';
@@ -355,6 +356,12 @@ void VirtualTerminal::apply_csi(std::string_view params, char final_byte)
         }
         if (mode == "25") {
             return;  // 光标可见性不影响记账
+        }
+        if (mode == "1000" || mode == "1006") {
+            return;  // 鼠标报告模式不影响画面记账
+        }
+        if (mode == "2004") {
+            return;  // bracketed paste 输入模式不影响画面记账
         }
     }
 

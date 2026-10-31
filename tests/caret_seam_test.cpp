@@ -108,6 +108,16 @@ bool has_rectangular_caret_style(
         || (caret_text == kBlockCaret && caret_style == text_style);
 }
 
+void count_caret_animation(void* context) noexcept
+{
+    ++*static_cast<int*>(context);
+}
+
+void count_caret_delayed_animation(void* context, std::int64_t) noexcept
+{
+    ++*static_cast<int*>(context);
+}
+
 }  // namespace
 
 // issue #26 红 3：一个行为贯穿四次成功提交。
@@ -121,7 +131,7 @@ bool has_rectangular_caret_style(
 //   4. resize 实验：不再推进动画，只在**同一个** FrameBuffer 上改变宽度；新的物理
 //      网格上仍满足同一契约，证明 resize 没有把 caret 留在旧布局或旧 front。
 //
-// 测试只观察 VirtualTerminal 的格子，不读取 Frame::cursor，也不要求某种 Maya
+// 测试只观察 VirtualTerminal 的格子，不要求某种 Maya
 // 内部实现。当前实现会失败，因为 Composer 把 U+2588 当额外字形插进正文，并在
 // idle 状态随动画钟切换前景样式：它既改变布局，也不是稳定的矩形格。
 TEST(CaretSeamTest, PaintedCaretPreservesTextAndStaysSolidAcrossCommitsAndResize)
@@ -218,4 +228,25 @@ TEST(CaretSeamTest, PaintedCaretPreservesTextAndStaysSolidAcrossCommitsAndResize
         << "resize 后插入格不再是应用画出的矩形 caret";
     EXPECT_EQ(first_caret_style, resized_caret_style)
         << "resize 改变了 solid caret 的格子样式";
+}
+
+TEST(CaretSeamTest, SolidCellDoesNotScheduleASeparateBlinkAnimation)
+{
+    my_agent::Model model;
+    my_agent::ui::UiState ui;
+    ui.input = "draft";
+    ui.cursor = kCursorOffset;
+
+    int requests = 0;
+    maya::anim::AnimationHostScope host{
+        &requests,
+        &count_caret_animation,
+        &count_caret_delayed_animation,
+    };
+    maya::FrameBuffer framebuffer{kWideColumns, kRows};
+    const maya::Theme theme = maya::theme::dark;
+    static_cast<void>(render_dock_frame(model, ui, theme, framebuffer));
+
+    EXPECT_EQ(0, requests)
+        << "SolidCell caret must not add a second animation clock";
 }

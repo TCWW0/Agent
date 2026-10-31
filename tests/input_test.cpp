@@ -41,7 +41,7 @@ TEST(InputTest, StitchesAMultibyteCharacterSplitAcrossTwoReads)
     EXPECT_EQ("你", second[0].text);
 }
 
-// 场景：回车、退格、Ctrl-C、Ctrl-U、Ctrl-D。
+// 场景：回车、退格、Ctrl-C、Ctrl-U、Ctrl-D、Ctrl-R、Ctrl-X。
 // 领域语义：这四个是控制字节而不是文本 —— 把它们当文本会往输入行里插入不可见字符。
 // 回车在 raw mode 下是 \r 而不是 \n（关掉了 ICRNL），认错会让回车毫无反应，
 // 这是 raw mode 下最典型的失误。Ctrl-C 必须作为按键到达而不是杀进程，
@@ -53,18 +53,49 @@ TEST(InputTest, DecodesControlBytesAsKeysRatherThanText)
 
     // \r 而非 \n：raw mode 关掉了 ICRNL，回车原样是 \r。
     const std::vector<my_agent::ui::Key> keys = decoder.feed(
-        "\r\x7f\x03\x15\x04"
+        "\r\x7f\x03\x15\x04\x12\x18"
     );
 
-    ASSERT_EQ(5u, keys.size());
+    ASSERT_EQ(7u, keys.size());
     EXPECT_EQ(my_agent::ui::Key::Kind::Enter, keys[0].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::Backspace, keys[1].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::Interrupt, keys[2].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::ClearInput, keys[3].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::Eof, keys[4].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ResumeQueue, keys[5].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ClearQueue, keys[6].kind);
     for (const my_agent::ui::Key& key : keys) {
         EXPECT_TRUE(key.text.empty()) << "控制键不该带文本";
     }
+}
+
+TEST(InputTest, DecodesBracketedPasteAsOneTextEvent)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::InputEvent> events = decoder.feed_events(
+        "\x1b[200~first line\nsecond line\r\nthird line\x1b[201~"
+    );
+
+    ASSERT_EQ(1u, events.size());
+    const auto* paste = std::get_if<my_agent::ui::PasteEvent>(&events.front());
+    ASSERT_NE(nullptr, paste);
+    EXPECT_EQ("first line\nsecond line\r\nthird line", paste->text);
+}
+
+TEST(InputTest, StitchesBracketedPasteMarkersAcrossReads)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    EXPECT_TRUE(decoder.feed_events("\x1b[200~first\nsec").empty());
+    const std::vector<my_agent::ui::InputEvent> events = decoder.feed_events(
+        "ond\x1b[201~"
+    );
+
+    ASSERT_EQ(1u, events.size());
+    const auto* paste = std::get_if<my_agent::ui::PasteEvent>(&events.front());
+    ASSERT_NE(nullptr, paste);
+    EXPECT_EQ("first\nsecond", paste->text);
 }
 
 // 场景：方向键等未支持的转义序列。
@@ -118,6 +149,128 @@ TEST(InputTest, DecodesCursorMovementEscapeSequences)
     EXPECT_EQ(my_agent::ui::Key::Kind::End, keys[5].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::Home, keys[6].kind);
     EXPECT_EQ(my_agent::ui::Key::Kind::End, keys[7].kind);
+}
+
+// 场景：在 transcript 上翻页或跳到首尾。
+// 领域语义：PageUp/PageDown 属于 transcript 导航，而 Ctrl+Home/Ctrl+End
+// 是回到最旧/最新内容的明确手势；裸 Home/End 仍然交给 composer 编辑器。
+// Red 原因：当前 decoder 只识别裸 Home/End，导航序列会被整段丢弃。
+TEST(InputTest, DecodesTranscriptNavigationWithoutChangingBareComposerKeys)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::Key> keys = decoder.feed(
+        "\x1b[5~\x1b[6~\x1b[1;5H\x1b[1;5F\x1b[H\x1b[F"
+    );
+
+    ASSERT_EQ(6u, keys.size());
+    EXPECT_EQ(my_agent::ui::Key::Kind::PageUp, keys[0].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::PageDown, keys[1].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ControlHome, keys[2].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ControlEnd, keys[3].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::Home, keys[4].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::End, keys[5].kind);
+}
+
+TEST(InputTest, StitchesTranscriptNavigationSequencesAcrossReads)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::Key> first = decoder.feed("\x1b[1;");
+    EXPECT_TRUE(first.empty());
+
+    const std::vector<my_agent::ui::Key> second = decoder.feed("5H");
+    ASSERT_EQ(1u, second.size());
+    EXPECT_EQ(my_agent::ui::Key::Kind::ControlHome, second[0].kind);
+}
+
+TEST(InputTest, KeepsKittyUnmodifiedHomeAndEndAsComposerKeys)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::Key> keys = decoder.feed(
+        "\x1b[57360u\x1b[57361u\x1b[57362u\x1b[57363u"
+        "\x1b[57360;5u\x1b[57361;5u"
+    );
+
+    ASSERT_EQ(6u, keys.size());
+    EXPECT_EQ(my_agent::ui::Key::Kind::Home, keys[0].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::End, keys[1].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::PageUp, keys[2].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::PageDown, keys[3].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ControlHome, keys[4].kind);
+    EXPECT_EQ(my_agent::ui::Key::Kind::ControlEnd, keys[5].kind);
+}
+
+TEST(InputTest, DecodesSgrMouseButtonsCoordinatesAndModifiers)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::InputEvent> events = decoder.feed_events(
+        "\x1b[<93;12;7M\x1b[<0;3;4m\x1b[<32;8;9M"
+    );
+
+    ASSERT_EQ(3u, events.size());
+    const auto& wheel = std::get<my_agent::ui::MouseEvent>(events[0]);
+    EXPECT_EQ(my_agent::ui::MouseButton::ScrollDown, wheel.button);
+    EXPECT_EQ(my_agent::ui::MouseEventKind::Press, wheel.kind);
+    EXPECT_EQ(12, wheel.x);
+    EXPECT_EQ(7, wheel.y);
+    EXPECT_TRUE(wheel.modifiers.shift);
+    EXPECT_TRUE(wheel.modifiers.alt);
+    EXPECT_TRUE(wheel.modifiers.ctrl);
+
+    const auto& release = std::get<my_agent::ui::MouseEvent>(events[1]);
+    EXPECT_EQ(my_agent::ui::MouseButton::Left, release.button);
+    EXPECT_EQ(my_agent::ui::MouseEventKind::Release, release.kind);
+
+    const auto& move = std::get<my_agent::ui::MouseEvent>(events[2]);
+    EXPECT_EQ(my_agent::ui::MouseButton::Left, move.button);
+    EXPECT_EQ(my_agent::ui::MouseEventKind::Move, move.kind);
+}
+
+TEST(InputTest, StitchesSgrMouseReportsAcrossReadsAndKeepsFollowingText)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    const std::vector<my_agent::ui::InputEvent> first = decoder.feed_events(
+        "\x1b[<64;12;"
+    );
+    EXPECT_TRUE(first.empty());
+
+    const std::vector<my_agent::ui::InputEvent> second = decoder.feed_events(
+        "7Mtail"
+    );
+    ASSERT_EQ(5u, second.size());
+    EXPECT_EQ(
+        my_agent::ui::MouseButton::ScrollUp,
+        std::get<my_agent::ui::MouseEvent>(second[0]).button);
+    EXPECT_EQ("t", std::get<my_agent::ui::Key>(second[1]).text);
+    EXPECT_EQ("l", std::get<my_agent::ui::Key>(second[4]).text);
+}
+
+TEST(InputTest, RejectsMalformedAndOversizedSgrReportsWithoutLosingFollowingText)
+{
+    my_agent::ui::InputDecoder decoder;
+
+    std::string oversized{"\x1b[<64;"};
+    oversized.append(300, '1');
+    oversized += ";7;8Mtail";
+
+    const std::vector<my_agent::ui::InputEvent> events = decoder.feed_events(
+        "\x1b[<64;bad;7Mok" + oversized
+    );
+
+    std::string text;
+    for (const auto& event : events) {
+        if (const auto* key = std::get_if<my_agent::ui::Key>(&event)) {
+            text += key->text;
+        }
+    }
+    EXPECT_EQ("oktail", text);
+    for (const auto& event : events) {
+        EXPECT_FALSE(std::holds_alternative<my_agent::ui::MouseEvent>(event));
+    }
 }
 
 }  // namespace

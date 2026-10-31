@@ -1,6 +1,5 @@
 #include "my_agent/tool/memory_store.hpp"
 #include "my_agent/tool/effects.hpp"
-#include "my_agent/tool/tool.hpp"
 #include "../src/tool/memory_tools.hpp"
 
 #include <algorithm>
@@ -244,14 +243,16 @@ TEST_F(MemoryStoreTest, ReturnsNoRecordsWhenTheScopeFileDoesNotExistYet)
 
 namespace {
 
-const my_agent::tool::ToolDef& find_tool(
-    const std::vector<my_agent::tool::ToolDef>& tools,
+my_agent::tool::RegisteredTool find_tool(
+    const std::vector<my_agent::tool::RegisteredTool>& tools,
     std::string_view name
 )
 {
     const auto found = std::ranges::find_if(
         tools,
-        [name](const my_agent::tool::ToolDef& tool) { return tool.name == name; }
+        [name](const my_agent::tool::RegisteredTool& tool) {
+            return tool.descriptor.name.value == name;
+        }
     );
     if (found == tools.end()) {
         throw std::runtime_error{"tool not found: " + std::string{name}};
@@ -269,15 +270,15 @@ const my_agent::tool::ToolDef& find_tool(
 TEST_F(MemoryStoreTest, RememberToolWritesAFactThatIsImmediatelyLoadable)
 {
     auto store = std::make_shared<memory::MemoryStore>(roots());
-    const std::vector<my_agent::tool::ToolDef> tools =
+    const std::vector<my_agent::tool::RegisteredTool> tools =
         my_agent::tool::detail::make_memory_tools(store);
 
-    const my_agent::tool::ToolDef& remember = find_tool(tools, "remember");
+    const my_agent::tool::RegisteredTool remember = find_tool(tools, "remember");
 
-    const my_agent::tool::ExecResult result = remember.execute(nlohmann::json{
+    const my_agent::tool::ExecResult result = remember.handler(nlohmann::json{
         {"text", "prefers concise answers"},
         {"scope", "project"},
-    });
+    }, my_agent::tool::ToolExecutionContext{});
 
     ASSERT_TRUE(result.has_value()) << result.error().message;
     // 输出里要带上 id，模型后续才能用它精确 forget。
@@ -296,13 +297,13 @@ TEST_F(MemoryStoreTest, RememberToolWritesAFactThatIsImmediatelyLoadable)
 TEST_F(MemoryStoreTest, RememberToolDefaultsToProjectScope)
 {
     auto store = std::make_shared<memory::MemoryStore>(roots());
-    const std::vector<my_agent::tool::ToolDef> tools =
+    const std::vector<my_agent::tool::RegisteredTool> tools =
         my_agent::tool::detail::make_memory_tools(store);
 
     const my_agent::tool::ExecResult result =
-        find_tool(tools, "remember").execute(nlohmann::json{
+        find_tool(tools, "remember").handler(nlohmann::json{
             {"text", "builds with cmake"},
-        });
+        }, my_agent::tool::ToolExecutionContext{});
 
     ASSERT_TRUE(result.has_value()) << result.error().message;
     EXPECT_EQ(std::size_t{1}, store->load_all(memory::Scope::Project).size());
@@ -315,19 +316,20 @@ TEST_F(MemoryStoreTest, RememberToolDefaultsToProjectScope)
 TEST_F(MemoryStoreTest, RememberToolRejectsMissingTextAndUnknownScope)
 {
     auto store = std::make_shared<memory::MemoryStore>(roots());
-    const my_agent::tool::ToolDef& remember = find_tool(
+    const my_agent::tool::RegisteredTool remember = find_tool(
         my_agent::tool::detail::make_memory_tools(store), "remember"
     );
 
     const my_agent::tool::ExecResult no_text =
-        remember.execute(nlohmann::json::object());
+        remember.handler(nlohmann::json::object(),
+                         my_agent::tool::ToolExecutionContext{});
     ASSERT_FALSE(no_text.has_value());
     EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, no_text.error().kind);
 
-    const my_agent::tool::ExecResult bad_scope = remember.execute(nlohmann::json{
+    const my_agent::tool::ExecResult bad_scope = remember.handler(nlohmann::json{
         {"text", "a fact"},
         {"scope", "global"},
-    });
+    }, my_agent::tool::ToolExecutionContext{});
     ASSERT_FALSE(bad_scope.has_value());
     EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, bad_scope.error().kind);
 
@@ -340,22 +342,24 @@ TEST_F(MemoryStoreTest, RememberToolRejectsMissingTextAndUnknownScope)
 TEST_F(MemoryStoreTest, ForgetToolRemovesByIdAndBySubstring)
 {
     auto store = std::make_shared<memory::MemoryStore>(roots());
-    const std::vector<my_agent::tool::ToolDef> tools =
+    const std::vector<my_agent::tool::RegisteredTool> tools =
         my_agent::tool::detail::make_memory_tools(store);
-    const my_agent::tool::ToolDef& forget = find_tool(tools, "forget");
+    const my_agent::tool::RegisteredTool forget = find_tool(tools, "forget");
 
     const std::string id =
         store->append(memory::Scope::Project, "deploy via kubectl").id;
     ASSERT_TRUE(store->append(memory::Scope::Project, "uses zsh").error.empty());
 
     const my_agent::tool::ExecResult by_id =
-        forget.execute(nlohmann::json{{"id", id}});
+        forget.handler(nlohmann::json{{"id", id}},
+                       my_agent::tool::ToolExecutionContext{});
     ASSERT_TRUE(by_id.has_value()) << by_id.error().message;
     EXPECT_NE(std::string::npos, by_id->text.find('1'));
     ASSERT_EQ(std::size_t{1}, store->load_all(memory::Scope::Project).size());
 
     const my_agent::tool::ExecResult by_text =
-        forget.execute(nlohmann::json{{"text", "zsh"}});
+        forget.handler(nlohmann::json{{"text", "zsh"}},
+                       my_agent::tool::ToolExecutionContext{});
     ASSERT_TRUE(by_text.has_value()) << by_text.error().message;
     EXPECT_TRUE(store->load_all(memory::Scope::Project).empty());
 }
@@ -370,7 +374,8 @@ TEST_F(MemoryStoreTest, ForgetToolSucceedsWithZeroRemovalsForAnUnknownId)
 
     const my_agent::tool::ExecResult result = find_tool(
         my_agent::tool::detail::make_memory_tools(store), "forget"
-    ).execute(nlohmann::json{{"id", "deadbeef"}});
+    ).handler(nlohmann::json{{"id", "deadbeef"}},
+              my_agent::tool::ToolExecutionContext{});
 
     ASSERT_TRUE(result.has_value()) << result.error().message;
     EXPECT_NE(std::string::npos, result->text.find('0'));
@@ -393,7 +398,8 @@ TEST_F(MemoryStoreTest, ForgetToolSaysNothingMatchedSoTheModelDoesNotClaimSucces
 
     const my_agent::tool::ExecResult result = find_tool(
         my_agent::tool::detail::make_memory_tools(store), "forget"
-    ).execute(nlohmann::json{{"text", "shell preference"}});
+    ).handler(nlohmann::json{{"text", "shell preference"}},
+              my_agent::tool::ToolExecutionContext{});
 
     ASSERT_TRUE(result.has_value()) << result.error().message;
     EXPECT_EQ(std::size_t{1}, store->load_all(memory::Scope::Project).size());
@@ -414,7 +420,8 @@ TEST_F(MemoryStoreTest, ForgetToolRequiresEitherAnIdOrAText)
 
     const my_agent::tool::ExecResult result = find_tool(
         my_agent::tool::detail::make_memory_tools(store), "forget"
-    ).execute(nlohmann::json::object());
+    ).handler(nlohmann::json::object(),
+              my_agent::tool::ToolExecutionContext{});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, result.error().kind);
@@ -448,20 +455,11 @@ TEST_F(MemoryStoreTest, RendersRecordsWithTheirIdSoTheModelCanForgetThemPrecisel
 TEST_F(MemoryStoreTest, MemoryToolsDeclareWriteFsSoThePolicyLayerCanGateThem)
 {
     auto store = std::make_shared<memory::MemoryStore>(roots());
-    const std::vector<my_agent::tool::ToolDef> tools =
+    const std::vector<my_agent::tool::RegisteredTool> tools =
         my_agent::tool::detail::make_memory_tools(store);
 
     for (const char* name : {"remember", "forget"}) {
-        const my_agent::tool::ToolDef& tool = find_tool(tools, name);
-        EXPECT_TRUE(tool.effects.has(my_agent::tool::Effect::WriteFs)) << name;
+        const my_agent::tool::RegisteredTool tool = find_tool(tools, name);
+        EXPECT_TRUE(tool.descriptor.effects.has(my_agent::tool::Effect::WriteFs)) << name;
     }
-}
-
-// 场景：从全局 registry 里找这两个工具。
-// 领域语义：工具只有进了 registry 才会出现在发给模型的 tools 表里 —— 否则模型
-// 根本不知道它可以 remember。这是 M7 接入阶段一预留 seam 的证明。
-TEST_F(MemoryStoreTest, RegistersMemoryToolsInTheGlobalRegistry)
-{
-    EXPECT_NE(nullptr, my_agent::tool::find("remember"));
-    EXPECT_NE(nullptr, my_agent::tool::find("forget"));
 }

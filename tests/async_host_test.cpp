@@ -1,596 +1,573 @@
 #include "my_agent/runtime/async_host.hpp"
-#include "my_agent/tool/tool.hpp"
-
-#include <atomic>
-#include <cstddef>
-#include <semaphore>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <utility>
-#include <variant>
+#include "my_agent/runtime/agent.hpp"
+#include "my_agent/prompt/system_prompt.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
+#include "my_agent/tool/session_services.hpp"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <semaphore>
+#include <string>
+#include <string_view>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <unistd.h>
+
+#include <nlohmann/json.hpp>
+
 using namespace std::chrono_literals;
 
-// 场景：Provider 已经在真实后台线程完成了一次文本回合的事件投递。
-// 领域语义：后台事件只有进入 owner thread 的 drain/update 流程后，才能成为
-// Model 中的事实；Inbox 投递本身只能唤醒 owner，不能直接修改 Core 状态。
-// Red 时失败原因：仓库尚不存在公开 AsyncHost seam，也没有跨线程 Inbox/wake
-// 与 owner-thread drain 的实现。
-TEST(AsyncHostTest, BackgroundProviderEventsChangeModelOnlyWhenOwnerDrainsInbox)
+namespace {
+
+using my_agent::ToolReplayMode;
+using my_agent::ToolReplayRule;
+using my_agent::ToolSpec;
+using my_agent::tool::ExecResult;
+using my_agent::tool::RegisteredTool;
+using my_agent::tool::ToolDescriptor;
+using my_agent::tool::ToolExecutionContext;
+using my_agent::tool::ToolName;
+using my_agent::tool::ToolOutput;
+using my_agent::tool::ToolRuntime;
+
+static_assert(!std::is_constructible_v<my_agent::AsyncHost,
+                                       my_agent::StreamEffect>);
+static_assert(std::is_constructible_v<my_agent::AsyncHost,
+                                      my_agent::StreamEffect,
+                                      std::shared_ptr<const ToolRuntime>>);
+
+constexpr std::string_view kProbeName = "projection_probe";
+
+nlohmann::json probe_schema(std::string_view marker)
 {
-    const std::thread::id owner_thread = std::this_thread::get_id();
-    std::thread::id provider_thread;
-
-    // 用于本测试了解当前 Provider 已经处理完成了对应的投递
-    std::binary_semaphore provider_finished{0};
-
-    my_agent::StreamEffect fake_stream =
-        [&](my_agent::Request, my_agent::EventSink sink) {
-            provider_thread = std::this_thread::get_id();
-
-            sink(my_agent::Msg{
-                my_agent::StreamTextDelta{.text = "pong"},
-            });
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-
-            provider_finished.release();
-        };
-
-    my_agent::AsyncHost host{std::move(fake_stream)};
-
-    host.dispatch(my_agent::Msg{
-        my_agent::Submit{.text = "ping"},
-    });
-
-    ASSERT_TRUE(provider_finished.try_acquire_for(1s));
-    EXPECT_NE(owner_thread, provider_thread);
-
-    const my_agent::Model& before_drain = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(
-        before_drain.phase
-    ));
-    ASSERT_EQ(std::size_t{2}, before_drain.thread.messages.size());
-    EXPECT_TRUE(before_drain.thread.messages.back().text.empty());
-
-    EXPECT_TRUE(host.wait_wake(1s));
-
-    host.drain_inbox();
-
-    const my_agent::Model& after_drain = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(after_drain.phase));
-    ASSERT_EQ(std::size_t{2}, after_drain.thread.messages.size());
-    EXPECT_EQ("pong", after_drain.thread.messages.back().text);
+    return nlohmann::json{
+        {"type", "object"},
+        {"properties", nlohmann::json{
+            {"sentinel", nlohmann::json{{"type", "string"}}},
+        }},
+        {"x-ts004-marker", marker},
+    };
 }
 
-// 场景：Provider 产生一个无需审批的工具调用，Core 随后要求宿主执行它。
-// 领域语义：工具可以在后台线程完成，但 ToolExecOutput 只有经过 owner thread
-// 的 drain/update 流程后，才能把 ToolCall 从 Pending 转换为 Done。
-// 当前失败原因：AsyncHost 尚未公开 ToolExecEffect 注入 seam，RunTool 路径也
-// 尚未把工具结果投递回 Inbox。
-TEST(AsyncHostTest, BackgroundToolResultChangesModelOnlyWhenOwnerDrainsInbox)
+std::shared_ptr<const ToolRuntime> probe_runtime(
+    std::string_view marker = "request-preparation",
+    my_agent::tool::ToolHandler handler = [](const nlohmann::json&,
+        const ToolExecutionContext&) -> ExecResult {
+        return ToolOutput{.text = "unused"};
+    })
 {
-    const std::thread::id owner_thread = std::this_thread::get_id();
-    std::thread::id tool_thread;
+    auto runtime = std::make_shared<ToolRuntime>(
+        std::vector<RegisteredTool>{
+            RegisteredTool{
+                .descriptor = ToolDescriptor{
+                    .name = ToolName{.value = std::string{kProbeName}},
+                    .description = "TS-004 projection sentinel",
+                    .input_schema = probe_schema(marker),
+                    .effects = {},
+                    .replay = ToolReplayRule{
+                        .mode = ToolReplayMode::Full,
+                        .weight = 3,
+                    },
+                },
+                .handler = std::move(handler),
+            },
+        });
+    return runtime;
+}
 
-    std::binary_semaphore first_provider_finished{0};
-    std::binary_semaphore tool_finished{0};
+std::shared_ptr<const ToolRuntime> empty_runtime()
+{
+    return std::make_shared<const ToolRuntime>(std::vector<RegisteredTool>{});
+}
 
+void expect_probe_tool(
+    const my_agent::Request& request,
+    std::string_view marker = "request-preparation")
+{
+    ASSERT_EQ(std::size_t{1}, request.tools.size());
+    EXPECT_EQ(kProbeName, request.tools.front().name);
+    EXPECT_EQ("TS-004 projection sentinel",
+              request.tools.front().description);
+    EXPECT_EQ(probe_schema(marker), request.tools.front().input_schema);
+    EXPECT_EQ(ToolReplayMode::Full, request.tools.front().replay_mode);
+    EXPECT_EQ(std::uint32_t{3}, request.tools.front().replay_weight);
+}
+
+struct RequestCapture {
+    void add(my_agent::Request request)
+    {
+        std::lock_guard<std::mutex> lock{mutex};
+        requests.push_back(std::move(request));
+    }
+
+    [[nodiscard]] std::vector<my_agent::Request> snapshot() const
+    {
+        std::lock_guard<std::mutex> lock{mutex};
+        return requests;
+    }
+
+    mutable std::mutex mutex;
+    std::vector<my_agent::Request> requests;
+};
+
+void install_context_management(my_agent::AsyncHost& host)
+{
+    my_agent::ContextManagementConfig management;
+    management.configured_limit = 8192;
+    management.safety_margin = 64;
+    host.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{.policy = my_agent::RequestPolicy{management, "test-provider", "test-model"}}});
+}
+
+struct CalculatorHostRun {
+    std::vector<my_agent::Request> requests;
+    my_agent::Model model;
+};
+
+CalculatorHostRun run_native_calculator(
+    nlohmann::json args,
+    std::string final_answer)
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path()
+        / ("my_agent_ts007_async_"
+           + std::to_string(::getpid()) + "_"
+           + std::to_string(std::chrono::steady_clock::now()
+                                .time_since_epoch().count()));
+    fs::create_directories(root / "workspace");
+    fs::create_directories(root / "skills");
+    fs::create_directories(root / "docs");
+
+    my_agent::tool::SessionFacts facts{
+        .workspace_root = root / "workspace",
+        .memory_roots = my_agent::tool::memory::Roots{
+            .user = root / "memory-user",
+            .project = root / "memory-project",
+        },
+        .skill_roots = {root / "skills"},
+        .docs = my_agent::tool::docs::DocsConfig{
+            .root = root / "docs",
+            .root_missing = false,
+        },
+    };
+    const my_agent::tool::SessionServices services{std::move(facts)};
+    auto runtime = std::make_shared<ToolRuntime>(services.registrations());
+
+    RequestCapture capture;
+    std::atomic_size_t provider_calls{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            capture.add(std::move(request));
+            if (provider_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
+                    .id = "calculator-call",
+                    .name = "calculator",
+                    .args = std::move(args),
+                }});
+            } else {
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                    .text = std::move(final_answer),
+                }});
+            }
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        std::move(runtime),
+    };
+    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "use calculator"}});
+    host.run_until_quiescent();
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    return CalculatorHostRun{
+        .requests = capture.snapshot(),
+        .model = host.model(),
+    };
+}
+
+}  // namespace
+
+TEST(AsyncHostTest, InstallsOnlyTheUnifiedContextConfiguration)
+{
+    my_agent::AsyncHost host{
+        [](my_agent::Request, my_agent::ProviderEventSink) {},
+        empty_runtime(),
+    };
+    my_agent::ContextManagementConfig management;
+    management.configured_limit = 4096;
+    management.safety_margin = 64;
+
+    host.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{.policy = my_agent::RequestPolicy{management, "test-provider", "test-model"}}});
+
+    EXPECT_EQ(4096U, host.model().domain.request_policy.config().effective_limit());
+    EXPECT_EQ("test-model", host.model().domain.request_policy.provider_model());
+    EXPECT_EQ("test-provider", host.model().domain.request_policy.provider_name());
+}
+
+TEST(AsyncHostTest, PreparedNormalRequestCarriesTheExplicitOutputCap)
+{
+    std::atomic<std::uint64_t> observed_output_budget{0};
+    std::binary_semaphore provider_called{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            observed_output_budget.store(
+                request.max_output_tokens,
+                std::memory_order_release);
+            provider_called.release();
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        empty_runtime(),
+    };
+    my_agent::ContextManagementConfig management;
+    management.configured_limit = 8192;
+    management.safety_margin = 64;
+    host.dispatch(my_agent::Msg{my_agent::SetRequestPolicy{.policy = my_agent::RequestPolicy{management, "provider", "test-model"}}});
+
+    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "hello"}});
+    static_cast<void>(host.drain_inbox());
+    ASSERT_TRUE(provider_called.try_acquire_for(1s));
+    static_cast<void>(host.drain_inbox());
+    static_cast<void>(host.drain_inbox());
+
+    EXPECT_EQ(
+        management.normal_output_budget(),
+        observed_output_budget.load(std::memory_order_acquire));
+}
+
+TEST(AsyncHostTest, CoreDraftStartsWithoutToolsOrPrompt)
+{
+    const my_agent::Request draft = my_agent::canonical_request(
+        my_agent::Thread{});
+
+    EXPECT_TRUE(draft.tools.empty());
+    EXPECT_TRUE(draft.system_prompt.empty());
+}
+
+TEST(AsyncHostTest, PreparedStreamReceivesInjectedRuntimeProjection)
+{
+    std::optional<my_agent::Request> observed_request;
+    std::binary_semaphore provider_called{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            observed_request = std::move(request);
+            provider_called.release();
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        probe_runtime(),
+    };
+    host.set_system_prompt_provider([] {
+        return std::string{"TS-004 system prompt"};
+    });
+
+    host.dispatch(my_agent::Msg{
+        my_agent::Submit{.text = "prepare this request"},
+    });
+    host.run_until_quiescent();
+
+    ASSERT_TRUE(provider_called.try_acquire_for(1s));
+    ASSERT_TRUE(observed_request.has_value());
+    expect_probe_tool(*observed_request);
+    EXPECT_EQ("TS-004 system prompt", observed_request->system_prompt);
+}
+
+TEST(AsyncHostTest, QueuedContinuationUsesTheSamePreparationProjection)
+{
+    RequestCapture capture;
     std::atomic_size_t stream_calls{0};
-    std::string executed_name;
-    std::string executed_expression;
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            capture.add(std::move(request));
+            if (stream_calls.fetch_add(1) == 0) {
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
+                    .id = "calculator-call",
+                    .name = "unregistered_projection_probe",
+                    .args = nlohmann::json{
+                        {"operation", "multiply"},
+                        {"left", 6},
+                        {"right", 7},
+                    },
+                }});
+            }
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        probe_runtime(),
+    };
 
-    my_agent::StreamEffect fake_stream =
-        [&](my_agent::Request, my_agent::EventSink sink) {
-            if (stream_calls.fetch_add(1) != 0) {
+    host.dispatch(my_agent::Msg{
+        my_agent::Submit{.text = "continue after the tool"},
+    });
+    host.run_until_quiescent();
+
+    const std::vector<my_agent::Request> requests = capture.snapshot();
+    ASSERT_EQ(std::size_t{2}, requests.size());
+    expect_probe_tool(requests[0]);
+    expect_probe_tool(requests[1]);
+}
+
+TEST(AsyncHostTest, NativeCalculatorUsesSessionRuntimeAndContinues)
+{
+    const CalculatorHostRun run = run_native_calculator(
+        nlohmann::json{
+            {"operation", "multiply"},
+            {"left", 6},
+            {"right", 7},
+        },
+        "The result is 42.");
+
+    ASSERT_EQ(2u, run.requests.size());
+    const my_agent::Request& request = run.requests.front();
+    constexpr std::array<std::string_view, 6> expected_names{
+        "calculator", "read", "remember", "forget", "skill", "search_docs",
+    };
+    ASSERT_EQ(expected_names.size(), request.tools.size());
+    for (std::size_t i = 0; i < expected_names.size(); ++i) {
+        EXPECT_EQ(expected_names[i], request.tools[i].name);
+    }
+    const auto& calculator = request.tools.front();
+    EXPECT_EQ("Multiply two numbers.", calculator.description);
+    EXPECT_EQ("multiply",
+              calculator.input_schema["properties"]["operation"]["enum"][0]);
+
+    const my_agent::Request& continuation = run.requests.back();
+    ASSERT_GE(continuation.messages.size(), 2u);
+    const my_agent::Message& assistant_tool_call = continuation.messages[1];
+    ASSERT_EQ(1u, assistant_tool_call.tool_calls.size());
+    EXPECT_EQ("calculator", assistant_tool_call.tool_calls.front().name);
+    EXPECT_EQ("42", assistant_tool_call.tool_calls.front().output());
+
+    ASSERT_FALSE(run.model.domain.thread.messages.empty());
+    EXPECT_EQ("The result is 42.", run.model.domain.thread.messages.back().text);
+}
+
+TEST(AsyncHostTest, NativeCalculatorInvalidArgsReachContinuation)
+{
+    const CalculatorHostRun run = run_native_calculator(
+        nlohmann::json{
+            {"operation", "divide"},
+            {"left", 6},
+            {"right", 7},
+        },
+        "The calculator rejected that operation.");
+
+    ASSERT_EQ(2u, run.requests.size());
+    ASSERT_GE(run.requests.back().messages.size(), 2u);
+    const my_agent::Message& assistant_tool_call = run.requests.back().messages[1];
+    ASSERT_EQ(1u, assistant_tool_call.tool_calls.size());
+    EXPECT_TRUE(std::holds_alternative<my_agent::ToolCall::Failed>(
+        assistant_tool_call.tool_calls.front().status));
+    EXPECT_EQ(
+        "[invalid args] unsupported calculator operation: divide",
+        assistant_tool_call.tool_calls.front().output());
+
+    ASSERT_FALSE(run.model.domain.thread.messages.empty());
+    EXPECT_EQ(
+        "The calculator rejected that operation.",
+        run.model.domain.thread.messages.back().text);
+}
+
+TEST(AsyncHostTest, SessionMemoryToolsRefreshContinuationPrompt)
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path()
+        / ("my_agent_ts009_async_" + std::to_string(::getpid()) + "_"
+           + std::to_string(std::chrono::steady_clock::now()
+                                .time_since_epoch().count()));
+    fs::create_directories(root / "workspace");
+    fs::create_directories(root / "skills");
+    fs::create_directories(root / "docs");
+
+    const my_agent::tool::SessionServices services{
+        my_agent::tool::SessionFacts{
+            .workspace_root = root / "workspace",
+            .memory_roots = my_agent::tool::memory::Roots{
+                .user = root / "memory-user",
+                .project = root / "memory-project",
+            },
+            .skill_roots = {root / "skills"},
+            .docs = my_agent::tool::docs::DocsConfig{
+                .root = root / "docs",
+                .root_missing = false,
+            },
+        }};
+    auto runtime = std::make_shared<ToolRuntime>(services.registrations());
+    RequestCapture capture;
+    std::atomic_size_t provider_calls{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            capture.add(std::move(request));
+            const std::size_t call = provider_calls.fetch_add(1);
+            if (call == 0) {
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
+                    .id = "remember-call",
+                    .name = "remember",
+                    .args = nlohmann::json{{"text", "prefers the fish shell"}},
+                }});
+            } else if (call == 1) {
+                sink(my_agent::ProviderEvent{my_agent::StreamToolCall{
+                    .id = "forget-call",
+                    .name = "forget",
+                    .args = nlohmann::json{{"text", "prefers the fish shell"}},
+                }});
+            }
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        runtime,
+    };
+    host.set_system_prompt_provider([&services] {
+        return my_agent::prompt::build(my_agent::prompt::Context{
+            .working_directory = services.workspace_root().string(),
+            .operating_system = "test OS",
+            .memories = services.memory_lines(),
+            .skills_catalog = services.skill_catalog(),
+        });
+    });
+    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "remember then forget"}});
+    host.run_until_quiescent();
+
+    const std::vector<my_agent::Request> requests = capture.snapshot();
+    ASSERT_EQ(3u, requests.size());
+    EXPECT_EQ(std::string::npos,
+              requests[0].system_prompt.find("prefers the fish shell"));
+    EXPECT_NE(std::string::npos,
+              requests[1].system_prompt.find("prefers the fish shell"));
+    EXPECT_EQ(std::string::npos,
+              requests[2].system_prompt.find("prefers the fish shell"));
+    EXPECT_TRUE(services.memory_lines().empty());
+
+    std::error_code error;
+    fs::remove_all(root, error);
+}
+
+TEST(AsyncHostTest, RetryUsesTheSamePreparationProjection)
+{
+    RequestCapture capture;
+    std::atomic_size_t stream_calls{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            capture.add(std::move(request));
+            if (stream_calls.fetch_add(1) == 0) {
+                sink(my_agent::ProviderEvent{my_agent::StreamError{
+                    .message = "retry this request",
+                    .disposition = my_agent::FailureDisposition::RetryCurrent,
+                }});
                 return;
             }
-
-            sink(my_agent::Msg{
-                my_agent::StreamToolCall{
-                    .id = "call-1",
-                    .name = "calculator",
-                    .args = {{"expression", "1 + 1"}},
-                },
-            });
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-
-            first_provider_finished.release();
-        };
-
-    my_agent::ToolExecEffect fake_tool =
-        [&](std::string_view name, const nlohmann::json& args)
-            -> my_agent::tool::ExecResult {
-            tool_thread = std::this_thread::get_id();
-            executed_name = name;
-            executed_expression =
-                args.at("expression").get<std::string>();
-
-            tool_finished.release();
-            return my_agent::tool::ToolOutput{.text = "2"};
-        };
-
-    my_agent::AsyncHost host{
-        std::move(fake_stream),
-        std::move(fake_tool),
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        probe_runtime(),
     };
 
     host.dispatch(my_agent::Msg{
-        my_agent::Submit{.text = "calculate"},
+        my_agent::Submit{.text = "retry this request"},
     });
+    host.run_until_quiescent();
 
-    ASSERT_TRUE(first_provider_finished.try_acquire_for(1s));
-    ASSERT_TRUE(host.wait_wake(1s));
-
-    host.drain_inbox();
-
-    ASSERT_TRUE(tool_finished.try_acquire_for(1s));
-    EXPECT_NE(owner_thread, tool_thread);
-    EXPECT_EQ("calculator", executed_name);
-    EXPECT_EQ("1 + 1", executed_expression);
-
-    const my_agent::Model& before_tool_drain = host.model();
-    const auto* executing = std::get_if<my_agent::ExecutingTool>(
-        &before_tool_drain.phase
-    );
-    ASSERT_NE(nullptr, executing);
-    EXPECT_EQ("call-1", executing->id);
-
-    ASSERT_EQ(
-        std::size_t{1},
-        before_tool_drain.thread.messages.back().tool_calls.size()
-    );
-    EXPECT_TRUE(std::holds_alternative<my_agent::ToolCall::Pending>(
-        before_tool_drain.thread.messages.back().tool_calls.front().status
-    ));
-
-    ASSERT_TRUE(host.wait_wake(1s));
-    host.drain_inbox();
-
-    const my_agent::Model& after_tool_drain = host.model();
-    ASSERT_EQ(std::size_t{3}, after_tool_drain.thread.messages.size());
-
-    const my_agent::ToolCall& completed =
-        after_tool_drain.thread.messages.at(1).tool_calls.front();
-    const auto* done = std::get_if<my_agent::ToolCall::Done>(
-        &completed.status
-    );
-    ASSERT_NE(nullptr, done);
-    EXPECT_EQ("2", done->output);
+    const std::vector<my_agent::Request> requests = capture.snapshot();
+    ASSERT_EQ(std::size_t{2}, requests.size());
+    expect_probe_tool(requests[0]);
+    expect_probe_tool(requests[1]);
 }
 
-// 场景：Minimal Profile 下，Provider 返回一个需要审批的 read 工具调用。
-// owner thread 经多轮 drain 和 dispatch 交错完成：暂停等待审批 → 审批通过
-// → 后台执行工具 → continuation Provider 请求 → 最终文本。
-// 领域语义：M4 的完整权限闭环在 M5 异步宿主边界中正确运行。Provider 和
-// Tool 均在后台线程执行，Model 仅在 owner 调用 drain_inbox 后变更。
-// 当前是 characterization test：AsyncHost 已实现 Inbox/wake/后台 worker，
-// Core 的 update() 已包含完整权限逻辑，组合路径预期直接通过。
-TEST(AsyncHostTest, MinimalProfilePermissionFlowCompletesAcrossAsyncBoundary)
+TEST(AsyncHostTest, CompactionRequestDoesNotReceiveRuntimeTools)
 {
-    const std::thread::id owner_thread = std::this_thread::get_id();
-    std::thread::id provider_thread;
-    std::thread::id tool_thread;
-
-    std::binary_semaphore first_provider_finished{0};
-    std::binary_semaphore tool_finished{0};
-    std::binary_semaphore second_provider_finished{0};
-
+    RequestCapture capture;
     std::atomic_size_t stream_calls{0};
-    std::string executed_name;
-    std::string executed_path;
-
-    my_agent::StreamEffect fake_stream =
-        [&](my_agent::Request, my_agent::EventSink sink) {
-            provider_thread = std::this_thread::get_id();
-
-            const size_t call = stream_calls.fetch_add(1);
-            if (call == 0) {
-                sink(my_agent::Msg{
-                    my_agent::StreamToolCall{
-                        .id = "call-1",
-                        .name = "read",
-                        .args = {{"path", "test.txt"}},
-                    },
-                });
-                sink(my_agent::Msg{my_agent::StreamFinished{}});
-                first_provider_finished.release();
-            } else {
-                sink(my_agent::Msg{
-                    my_agent::StreamTextDelta{.text = "done"},
-                });
-                sink(my_agent::Msg{my_agent::StreamFinished{}});
-                second_provider_finished.release();
-            }
-        };
-
-    my_agent::ToolExecEffect fake_tool =
-        [&](std::string_view name, const nlohmann::json& args)
-            -> my_agent::tool::ExecResult {
-            tool_thread = std::this_thread::get_id();
-            executed_name = name;
-            executed_path = args.at("path").get<std::string>();
-            tool_finished.release();
-            return my_agent::tool::ToolOutput{.text = "file content here"};
-        };
-
     my_agent::AsyncHost host{
-        std::move(fake_stream),
-        std::move(fake_tool),
-    };
-
-    // 设为 Minimal，确保后续工具需要审批
-    host.dispatch(my_agent::Msg{
-        my_agent::SetProfile{my_agent::Profile::Minimal},
-    });
-
-    // 提交用户输入，启动 Provider
-    host.dispatch(my_agent::Msg{
-        my_agent::Submit{.text = "read file"},
-    });
-
-    // 等待 Provider 在线程中完成第一次调用
-    ASSERT_TRUE(first_provider_finished.try_acquire_for(1s));
-    EXPECT_NE(owner_thread, provider_thread);
-
-    // drain 前：Model 仍在 Streaming，文本为空
-    {
-        const my_agent::Model& m = host.model();
-        EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(m.phase));
-        ASSERT_EQ(std::size_t{2}, m.thread.messages.size());
-        EXPECT_TRUE(m.thread.messages.back().text.empty());
-    }
-
-    ASSERT_TRUE(host.wait_wake(1s));
-    host.drain_inbox();
-
-    // 第一次 drain 后：Core 判定 read + Minimal → 需要审批，暂停
-    {
-        const my_agent::Model& m = host.model();
-        EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
-            m.phase
-        ));
-        ASSERT_TRUE(m.pending_permission.has_value());
-        EXPECT_EQ("call-1", m.pending_permission->id);
-
-        ASSERT_EQ(std::size_t{2}, m.thread.messages.size());
-        ASSERT_EQ(std::size_t{1},
-            m.thread.messages.back().tool_calls.size());
-        EXPECT_TRUE(std::holds_alternative<my_agent::ToolCall::Pending>(
-            m.thread.messages.back().tool_calls.front().status
-        ));
-    }
-
-    // owner 审批通过
-    host.dispatch(my_agent::Msg{
-        my_agent::PermissionApprove{.id = "call-1"},
-    });
-
-    // dispatch 后：Model 立即进入 ExecutingTool（dispatch 是同步的）
-    {
-        const my_agent::Model& m = host.model();
-        const auto* executing = std::get_if<my_agent::ExecutingTool>(
-            &m.phase
-        );
-        ASSERT_NE(nullptr, executing);
-        EXPECT_EQ("call-1", executing->id);
-        EXPECT_FALSE(m.pending_permission.has_value());
-    }
-
-    // 等待 Tool 在线程中完成
-    ASSERT_TRUE(tool_finished.try_acquire_for(1s));
-    EXPECT_NE(owner_thread, tool_thread);
-    EXPECT_EQ("read", executed_name);
-    EXPECT_EQ("test.txt", executed_path);
-
-    ASSERT_TRUE(host.wait_wake(1s));
-    host.drain_inbox();
-
-    // 第二次 drain 后：Tool Done → continuation StartStream → 新 Provider worker
-    // Model 进入 Streaming（等待第二次 Provider 调用的结果）
-    {
-        const my_agent::Model& m = host.model();
-        EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(m.phase));
-
-        ASSERT_GE(m.thread.messages.size(), std::size_t{2});
-        const my_agent::ToolCall& completed_tc =
-            m.thread.messages.at(1).tool_calls.front();
-        const auto* done = std::get_if<my_agent::ToolCall::Done>(
-            &completed_tc.status
-        );
-        ASSERT_NE(nullptr, done);
-        EXPECT_EQ("file content here", done->output);
-    }
-
-    // 等待第二次 Provider 调用完成
-    ASSERT_TRUE(second_provider_finished.try_acquire_for(1s));
-    ASSERT_TRUE(host.wait_wake(1s));
-    host.drain_inbox();
-
-    // 第三次 drain 后：最终文本到达，回合结束
-    {
-        const my_agent::Model& m = host.model();
-        EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(m.phase));
-
-        ASSERT_EQ(std::size_t{3}, m.thread.messages.size());
-        EXPECT_EQ("done", m.thread.messages.back().text);
-    }
-}
-
-// 场景：shutdown 调用 request_stop() 后，正在执行中的 worker 的 EventSink
-// 检查 stop_requested() 为 true，从而跳过 Inbox 投递。
-// 领域语义：stop 是对所有后台 worker 的协作通知。Worker 在完成 Provider
-// 调用后，投递结果前检查 stop_token——若宿主已请求停止，则静默丢弃结果，
-// 不投递到 Inbox，不唤醒 owner。
-// Red 原因：AsyncHost 尚无 shutdown() 方法（编译错误）；worker 也未捕获
-// stop_token 或在其 EventSink 中检查 stop_requested()。
-TEST(AsyncHostTest, WorkerSinkSkipsPostingAfterShutdownRequestsStop)
-{
-    std::binary_semaphore stream_blocked{0};
-    std::binary_semaphore release_stream{0};
-    std::binary_semaphore stream_returned{0};
-
-    my_agent::StreamEffect blocking_stream =
-        [&](my_agent::Request, my_agent::EventSink sink) {
-            stream_blocked.release();
-            release_stream.acquire();  // 阻塞，等待测试释放
-            sink(my_agent::Msg{
-                my_agent::StreamTextDelta{.text = "late"},
-            });
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-            stream_returned.release();
-        };
-
-    my_agent::AsyncHost host{std::move(blocking_stream)};
-
-    host.dispatch(my_agent::Msg{
-        my_agent::Submit{.text = "ping"},
-    });
-
-    // Worker 已启动并阻塞在 release_stream 上
-    ASSERT_TRUE(stream_blocked.try_acquire_for(1s));
-
-    // Helper 线程：在 shutdown 调用 request_stop 后释放 worker
-    std::thread releaser([&] {
-        std::this_thread::sleep_for(50ms);
-        release_stream.release();
-    });
-
-    // owner 线程调用 shutdown：request_stop → join 所有 worker
-    host.shutdown();  // RED: 'shutdown' is not a member of 'my_agent::AsyncHost'
-
-    releaser.join();
-
-    // Worker 已返回（stream_returned 被 release）
-    EXPECT_TRUE(stream_returned.try_acquire_for(100ms));
-
-    // 核心断言：sink 检查了 stop_token，跳过了 post，wake 未被触发
-    EXPECT_FALSE(host.wait_wake(100ms));
-
-    // Model 仍停留在 Streaming（没有任何消息到达）
-    EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(
-        host.model().phase
-    ));
-}
-
-// 场景：注入系统提示 provider 后跑一个回合。
-// 领域语义：update() 是纯函数、不能读文件，所以 make_request() 只能把
-// system_prompt 留空；宿主在 effect 侧补上。这是 M7（memory/skills）唯一需要的
-// 接入点，也是"IO 留在 effect 侧、update 保持纯"这条边界的体现。
-// provider 每轮都被调用，因为 remember 工具会在会话过程中改动 memory 内容。
-TEST(AsyncHostTest, FillsSystemPromptFromProviderOnEveryRequest)
-{
-    std::vector<std::string> seen_prompts;
-    int builds = 0;
-
-    my_agent::StreamEffect fake_stream =
-        [&seen_prompts](my_agent::Request request, my_agent::EventSink sink) {
-            seen_prompts.push_back(request.system_prompt);
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-        };
-
-    my_agent::AsyncHost host{std::move(fake_stream)};
-    host.set_system_prompt_provider([&builds] {
-        ++builds;
-        return "prompt-" + std::to_string(builds);
-    });
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "one"}});
-    host.run_until_quiescent();
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "two"}});
-    host.run_until_quiescent();
-
-    ASSERT_EQ(std::size_t{2}, seen_prompts.size());
-    EXPECT_EQ("prompt-1", seen_prompts.at(0));
-    EXPECT_EQ("prompt-2", seen_prompts.at(1));
-}
-
-// 场景：没有注入 provider。
-// 领域语义：system_prompt 是可选的，缺省为空 —— 既有测试与 HeadlessRunner 都
-// 用 designated initializer 构造 Request，新字段缺省即空，所以它们零改动。
-TEST(AsyncHostTest, LeavesSystemPromptEmptyWithoutAProvider)
-{
-    std::string seen{"not-overwritten"};
-
-    my_agent::StreamEffect fake_stream =
-        [&seen](my_agent::Request request, my_agent::EventSink sink) {
-            seen = request.system_prompt;
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-        };
-
-    my_agent::AsyncHost host{std::move(fake_stream)};
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "ping"}});
-    host.run_until_quiescent();
-
-    EXPECT_TRUE(seen.empty());
-}
-
-// 场景：owner 提交输入后直接进入阻塞事件循环，不再手摇 wake/drain。
-// 领域语义：run_until_quiescent 是 owner thread 的主循环 —— 阻塞等唤醒、
-// drain Inbox、把 Msg 交给 update()、解释返回的 Cmd，直到没有 in-flight
-// worker 可等为止。一个纯文本回合的静止点是 Idle。
-TEST(AsyncHostTest, RunUntilQuiescentDrivesATextTurnToIdle)
-{
-    my_agent::StreamEffect fake_stream =
-        [](my_agent::Request, my_agent::EventSink sink) {
-            sink(my_agent::Msg{my_agent::StreamTextDelta{.text = "po"}});
-            sink(my_agent::Msg{my_agent::StreamTextDelta{.text = "ng"}});
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-        };
-
-    my_agent::AsyncHost host{std::move(fake_stream)};
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "ping"}});
-    host.run_until_quiescent();
-
-    const my_agent::Model& model = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(model.phase));
-    ASSERT_EQ(std::size_t{2}, model.thread.messages.size());
-    EXPECT_EQ("pong", model.thread.messages.back().text);
-}
-
-// 场景：Minimal Profile 下工具需要审批，循环必须在 AwaitingPermission 上返回。
-// 领域语义：AwaitingPermission 时等的是 owner 自己的审批输入，没有后台 worker
-// 会送来消息 —— 继续 wait 会永久挂死。所以它和 Idle 同为静止点。审批后再次进
-// 入循环，工具执行与 continuation 都在同一次调用内跑完。
-TEST(AsyncHostTest, RunUntilQuiescentReturnsWhileAwaitingPermission)
-{
-    std::atomic_size_t stream_calls{0};
-
-    my_agent::StreamEffect fake_stream =
-        [&stream_calls](my_agent::Request, my_agent::EventSink sink) {
+        [&](my_agent::Request request, my_agent::ProviderEventSink sink) {
+            capture.add(std::move(request));
             if (stream_calls.fetch_add(1) == 0) {
-                sink(my_agent::Msg{
-                    my_agent::StreamToolCall{
-                        .id = "call-1",
-                        .name = "read",
-                        .args = {{"path", "test.txt"}},
-                    },
-                });
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                    .text = "first answer",
+                }});
             } else {
-                sink(my_agent::Msg{my_agent::StreamTextDelta{.text = "done"}});
+                sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{
+                    .text = R"({"goal":"","constraints":[],"facts":[],"decisions":[],"state":[],"next_steps":[]})",
+                }});
             }
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-        };
-
-    my_agent::ToolExecEffect fake_tool =
-        [](std::string_view, const nlohmann::json&)
-            -> my_agent::tool::ExecResult {
-            return my_agent::tool::ToolOutput{.text = "file content here"};
-        };
-
-    my_agent::AsyncHost host{std::move(fake_stream), std::move(fake_tool)};
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+        },
+        probe_runtime(),
+    };
+    install_context_management(host);
 
     host.dispatch(my_agent::Msg{
-        my_agent::SetProfile{my_agent::Profile::Minimal},
+        my_agent::Submit{.text = "build history"},
     });
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "read file"}});
-
+    host.run_until_quiescent();
+    host.dispatch(my_agent::Msg{my_agent::RequestCompaction{}});
     host.run_until_quiescent();
 
-    {
-        const my_agent::Model& model = host.model();
-        ASSERT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
-            model.phase
-        ));
-        ASSERT_TRUE(model.pending_permission.has_value());
-        EXPECT_EQ("call-1", model.pending_permission->id);
-    }
+    const std::vector<my_agent::Request> requests = capture.snapshot();
+    ASSERT_EQ(std::size_t{2}, requests.size());
+    EXPECT_FALSE(requests[0].tools.empty());
+    EXPECT_TRUE(requests[1].tools.empty());
+}
+
+TEST(AsyncHostTest, PreparationFailureBlocksWithoutCallingProvider)
+{
+    std::atomic_size_t provider_calls{0};
+    my_agent::AsyncHost host{
+        [&](my_agent::Request, my_agent::ProviderEventSink) {
+            ++provider_calls;
+        },
+        probe_runtime(),
+    };
+    host.set_system_prompt_provider([]() -> std::string {
+        throw std::runtime_error{"prompt unavailable"};
+    });
 
     host.dispatch(my_agent::Msg{
-        my_agent::PermissionApprove{.id = "call-1"},
+        my_agent::Submit{.text = "must not escape the host"},
     });
     host.run_until_quiescent();
 
-    const my_agent::Model& model = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(model.phase));
-    ASSERT_EQ(std::size_t{3}, model.thread.messages.size());
-    EXPECT_EQ("done", model.thread.messages.back().text);
+    EXPECT_EQ(std::size_t{0}, provider_calls.load());
+    const auto* blocked = std::get_if<my_agent::Blocked>(
+        &host.model().session.phase);
+    ASSERT_NE(nullptr, blocked);
+    EXPECT_EQ(my_agent::BlockReason::ExplicitResumeRequired, blocked->reason);
+    EXPECT_NE(std::string::npos, blocked->message.find("prompt unavailable"));
+    ASSERT_EQ(std::size_t{1}, host.model().session.queued_messages.size());
 }
 
-// 场景：Provider 实现有 bug，一个终态事件都没投就返回了。
-// 领域语义：事件循环把 phase 当作 in-flight 计数器，这依赖"每次 stream 调用
-// 恰好投出一个终态事件"的边界保证。宿主必须在 worker 包装层强制这条保证，
-// 否则 owner 会永久停在 Streaming 上等一个永不到来的消息。用超时兜会让测试
-// flaky，所以在 worker 返回时合成 StreamError。
-TEST(AsyncHostTest, RunUntilQuiescentSurvivesStreamReturningWithoutTerminalEvent)
+TEST(AsyncHostTest, InjectedToolsParticipateInRequestFingerprint)
 {
-    my_agent::StreamEffect silent_stream =
-        [](my_agent::Request, my_agent::EventSink) {};
-
-    my_agent::AsyncHost host{std::move(silent_stream)};
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "ping"}});
-    host.run_until_quiescent();
-
-    const my_agent::Model& model = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(model.phase));
-    ASSERT_TRUE(model.thread.messages.back().error.has_value());
-    EXPECT_NE(
-        std::string::npos,
-        model.thread.messages.back().error->find("terminal event")
-    );
-}
-
-// 场景：Provider 抛异常逃出 stream 调用。
-// 领域语义：同一条边界保证的另一半。异常若逃出 worker 线程会触发
-// std::terminate，宿主必须把它收敛成一次 StreamError 交回 Core，让回合以
-// 可见的错误结束而不是整个进程崩掉。
-TEST(AsyncHostTest, RunUntilQuiescentConvertsStreamExceptionIntoStreamError)
-{
-    my_agent::StreamEffect throwing_stream =
-        [](my_agent::Request, my_agent::EventSink) {
-            throw std::runtime_error{"provider exploded"};
+    auto run = [](std::shared_ptr<const ToolRuntime> runtime) {
+        RequestCapture capture;
+        my_agent::AsyncHost host{
+            [&capture](my_agent::Request request,
+                       my_agent::ProviderEventSink sink) {
+                capture.add(std::move(request));
+                sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+            },
+            std::move(runtime),
         };
+        install_context_management(host);
+        host.dispatch(my_agent::Msg{
+            my_agent::Submit{.text = "fingerprint this"},
+        });
+        host.run_until_quiescent();
+        const auto requests = capture.snapshot();
+        EXPECT_EQ(1U, requests.size());
+        return !requests.empty()
+            ? my_agent::fingerprint_request("test-model", requests.front())
+            : my_agent::RequestFingerprint{};
+    };
 
-    my_agent::AsyncHost host{std::move(throwing_stream)};
+    const my_agent::RequestFingerprint first = run(
+        probe_runtime("fingerprint-a"));
+    const my_agent::RequestFingerprint second = run(
+        probe_runtime("fingerprint-b"));
 
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "ping"}});
-    host.run_until_quiescent();
-
-    const my_agent::Model& model = host.model();
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(model.phase));
-    ASSERT_TRUE(model.thread.messages.back().error.has_value());
-    EXPECT_EQ("provider exploded", *model.thread.messages.back().error);
-}
-
-// 场景：shutdown 后 owner 再次进入事件循环。
-// 领域语义：stop 是终态。循环入口先查 stop_requested 直接返回，否则 shutdown
-// 与 run 的竞态会让 owner 阻塞在一个再也不会有人 signal 的 wake 上。
-TEST(AsyncHostTest, RunUntilQuiescentReturnsImmediatelyAfterShutdown)
-{
-    std::binary_semaphore stream_blocked{0};
-    std::binary_semaphore release_stream{0};
-
-    my_agent::StreamEffect blocking_stream =
-        [&](my_agent::Request, my_agent::EventSink sink) {
-            stream_blocked.release();
-            release_stream.acquire();
-            sink(my_agent::Msg{my_agent::StreamFinished{}});
-        };
-
-    my_agent::AsyncHost host{std::move(blocking_stream)};
-
-    host.dispatch(my_agent::Msg{my_agent::Submit{.text = "ping"}});
-    ASSERT_TRUE(stream_blocked.try_acquire_for(1s));
-
-    std::thread releaser([&] {
-        std::this_thread::sleep_for(50ms);
-        release_stream.release();
-    });
-
-    host.shutdown();
-    releaser.join();
-
-    // Streaming 不是静止点，但 stop 已请求 —— 必须立刻返回而不是永久阻塞。
-    host.run_until_quiescent();
-
-    EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(
-        host.model().phase
-    ));
+    EXPECT_NE(first, second);
 }

@@ -2,7 +2,7 @@
 
 #include "my_agent/tool/effects.hpp"
 #include "my_agent/tool/skills.hpp"
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -51,20 +51,18 @@ ExecResult execute_skill(
 
 }  // namespace
 
-std::vector<ToolDef> make_skill_tools(
+RegisteredTool make_skill_tool(
     std::shared_ptr<skills::SkillEngine> engine
 )
 {
-    std::vector<ToolDef> tools;
-    tools.reserve(1);
-
-    tools.push_back(ToolDef{
-        .name = "skill",
-        .description =
-            "Load the full instructions of a skill listed in the skills "
-            "catalog. Do this when its task comes up rather than guessing what "
-            "the skill says.",
-        .input_schema = nlohmann::json{
+    return RegisteredTool{
+        .descriptor = ToolDescriptor{
+            .name = ToolName{.value = "skill"},
+            .description =
+                "Load the full instructions of a skill listed in the skills "
+                "catalog. Do this when its task comes up rather than guessing what "
+                "the skill says.",
+            .input_schema = nlohmann::json{
             {"type", "object"},
             {"properties", nlohmann::json{
                 {"name", nlohmann::json{
@@ -78,13 +76,15 @@ std::vector<ToolDef> make_skill_tools(
         },
         // activate 只读 SKILL.md，所以是 ReadFs 而不是 WriteFs。如实声明是纪律：
         // 谎报 effects 会让整个 policy 层失去可信度。
-        .effects = {Effect::ReadFs},
-        .execute = [engine = std::move(engine)](const nlohmann::json& args) {
+            .effects = {Effect::ReadFs},
+            .replay = {},
+        },
+        .handler = [engine = std::move(engine)](
+            const nlohmann::json& args,
+            const ToolExecutionContext&) {
             return execute_skill(*engine, args);
         },
-    });
-
-    return tools;
+    };
 }
 
 }  // namespace my_agent::tool::detail

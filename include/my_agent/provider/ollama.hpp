@@ -5,7 +5,9 @@
 
 #include <memory>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -19,6 +21,7 @@ public:
         std::uint64_t eval_count{0};
         double eval_duration_seconds{0.0};
         double tokens_per_second{0.0};
+        std::uint64_t generation{0};
     };
 
     void record(
@@ -35,6 +38,7 @@ private:
     std::atomic<std::uint64_t> prompt_eval_count_{0};
     std::atomic<std::uint64_t> eval_count_{0};
     std::atomic<std::uint64_t> eval_duration_nanoseconds_{0};
+    std::atomic<std::uint64_t> generation_{0};
 };
 
 // Ollama /api/chat 的响应是 NDJSON：一行一个 JSON 帧。HTTP 层交上来的是任意
@@ -49,10 +53,10 @@ public:
     explicit StreamDecoder(std::shared_ptr<StreamStats> stats = {});
 
     // 消费一个字节切片，对其中每个完整行投出对应的 Msg。
-    void feed(std::string_view chunk, const EventSink& sink);
+    void feed(std::string_view chunk, const ProviderEventSink& sink);
 
 private:
-    void process_line(std::string_view line, const EventSink& sink);
+    void process_line(std::string_view line, const ProviderEventSink& sink);
 
     std::string line_buf_;
     std::shared_ptr<StreamStats> stats_;
@@ -60,7 +64,10 @@ private:
 
 // 把 Thread 历史与工具规格编成 Ollama 的请求体。
 [[nodiscard]]
-std::string build_request_body(std::string_view model, const Request& request);
+std::string build_request_body(
+    std::string_view model,
+    const Request& request,
+    std::optional<std::size_t> num_ctx = {});
 
 // 组装成 StreamEffect：宿主把它放到共享池的 worker 上跑。
 [[nodiscard]]
@@ -69,7 +76,8 @@ StreamEffect make_stream(
     int port,
     std::string model,
     std::shared_ptr<http::HttpClient> client,
-    std::shared_ptr<StreamStats> stats = {}
+    std::shared_ptr<StreamStats> stats = {},
+    std::optional<std::size_t> num_ctx = {}
 );
 
 }  // namespace my_agent::provider::ollama

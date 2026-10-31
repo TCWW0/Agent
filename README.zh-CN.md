@@ -21,7 +21,7 @@
 
 这个项目存在的理由，是搞懂一个 TUI Agent**到底怎么工作** —— 靠亲手重建一个，而不是读一个。每个子系统以独立切片落地、各走一遍红→绿循环，提交记录就是课程表。
 
-- **事件循环才是主题。** 手工搭的 Elm 风格核心 —— `AsyncHost` 之上的 `(Model, Msg) → Model`，外加工作线程池与唤醒信号。[maya](https://github.com/1ay1/maya) 刻意**只用于渲染**；它的 `run<Program>` 循环在本仓库被明令禁用 —— 因为「拥有这个循环」正是项目的意义所在。
+- **事件循环才是主题。** 手工搭的 Elm 风格核心 —— `AsyncHost` 之上的 `(Model, Msg) → Step{Model, Cmd}`，外加工作线程池与唤醒信号。[maya](https://github.com/1ay1/maya) 刻意**只用于渲染**；它的 `run<Program>` 循环在本仓库被明令禁用 —— 因为「拥有这个循环」正是项目的意义所在。
 - **把终端当作对手。** raw mode 由 RAII 还原、**也**由信号处理器还原（SIGSEGV 下析构函数不会跑）；驱动用 `Synced`/`Divergent` 一致性状态机追踪屏幕，resize 或半途写失败都不可能在屏上留下幽灵单元格。每个论断都在真 pty + 虚拟终端模型上验证，宽度数据用官方 Unicode 16。
 - **本地优先。** 模型是 localhost 的 Ollama；检索完全离线（没有嵌入服务时退化为关键词路）；memory/skills 是 `.my_agent/` 下的普通文件 —— Claude Code 的 `.claude/` 目录直接读，不用复制。
 - **单二进制、零运行时依赖。** SSE 解析、BM25、RRF 融合、TUI —— 全部是自写的 C++/STL，只站在三个小型的固定版本库之上。
@@ -78,7 +78,7 @@ ollama pull qwen3.5:latest        # 或者任何你已有的模型
 <td width="50%">
 
 ### ⚡ 自有事件循环，无框架
-`AsyncHost` —— `dispatch` / `run_until_quiescent` / `model()` —— 驱动 `(Model, Msg) → Model` 的 reducer。工具跑在工作者线程池上、通过可 poll 的唤醒信号叫醒循环；重绘按帧窗口合并。渲染接缝只有两个调用：`FrameBuffer::render()` + `commit()`。
+`AsyncHost` —— `dispatch` / `run_until_quiescent` / `model()` —— 驱动 `(Model, Msg) → Step{Model, Cmd}` 的 reducer。工具跑在工作者线程池上、通过可 poll 的唤醒信号叫醒循环；重绘按帧窗口合并。渲染接缝只有两个调用：`FrameBuffer::render()` + `commit()`。
 
 ### 🛡️ 权限 profile
 每个工具声明效果集（`ReadFs` · `WriteFs` · `Net` · `Exec`）。`minimal` 对读也要确认、`ask` 对写确认、`write` 放开工作区；`read` 工具对工作区之外的路径一律拒绝，没有例外。
@@ -141,6 +141,7 @@ ollama pull nomic-embed-text && ollama serve # 可选：解锁稠密那半边
 | `Enter` | 发送（空行不发） | `y` / `n` | 批准 / 拒绝待确认的工具 |
 | `Backspace` | 删除一整个 UTF-8 字符 | `←` `→` `Home` `End` | 在输入行内移动 |
 | `↑` / `↓` | 在折行后的输入行间移动 | `^U` / `^C` | 清空草稿（绝不退出） |
+| `Ctrl-X` | 清空所有排队输入 | `Ctrl-R` | 重试被阻塞的队列 |
 | `Ctrl-D` | 退出 —— 唯一的退出路径 | | |
 
 ## 更多
@@ -148,11 +149,15 @@ ollama pull nomic-embed-text && ollama serve # 可选：解锁稠密那半边
 <details>
 <summary><b>架构</b></summary>
 
+当前运行时合同与状态流转见 [Runtime 架构](docs/RUNTIME-ARCHITECTURE.md)。
+本阶段的重构范围、代码库现状与后续建议见 [阶段总结（2026-10-09）](docs/REFACTOR-MILESTONE-2026-10-09.md)。
+
 - **更新循环**：`AsyncHost`（dispatch / `run_until_quiescent` / `model`）跑在
-  `runtime/agent.cpp` 的 `(Model, Msg) → Model` reducer 上。流式增量、工具结果、
+  `runtime/agent.cpp` 的 `(Model, Msg) → Step{Model, Cmd}` reducer 上。流式增量、工具结果、
   权限应答全部作为 `Msg` 走同一条收件箱；后台工作落在工作者线程池上，
   经可 poll 的唤醒信号叫醒循环。
-- **视图**：`Model → Element`（`ui/view.cpp`、`ui/screen.cpp`），由 maya 渲染。
+- **视图**：`Model + UiState → ScreenConfig`（`ui/screen.cpp`），由
+  `ui/painter.cpp` 交给 maya 渲染。
   项目只用一个 maya 接缝 —— `FrameBuffer::render()` + `commit()` —— 刻意不用
   `maya::run<App>`：循环是交付物，不是可以外包的细节。
 - **终端驱动**：全仓库唯一动 `termios`、唯一写终端字节的地方。备用屏 + raw
@@ -160,17 +165,15 @@ ollama pull nomic-embed-text && ollama serve # 可选：解锁稠密那半边
   覆盖析构不跑的那些路径。屏幕一致性是一个 `std::variant`：`Synced`
   （front 缓冲 == 终端像素，可差分）或 `Divergent`（尺寸变化或写失败 ——
   全量重序列化，逐行带行尾擦除，单次写出）。
-- **转录**：markdown 按行扫描、带围栏（fence）意识，流到一半的代码块渲染成
-  实时文本而不是闪烁。
-- **无头模式**：`headless_runner` 不开终端驱动同一套循环，在权限闸门处停下，
-  等外部应答。
+- **转录**：当前屏幕把消息投影到 maya 的 `Conversation` widget。助手正文
+  目前使用纯文本槽位；在飞状态另行投影。
 
 </details>
 
 <details>
 <summary><b>测试</b></summary>
 
-36 个测试二进制、343 个用例，全绿。这套测试不止单元测试：
+测试套件不止单元测试：
 
 - **真 pty** —— raw mode、resize、字节级输出都在真伪终端上验证，不用 mock。
 - **虚拟终端** —— 自写的 ECMA-48/DEC 模型，把应用*实际吐出*的字节解码成
@@ -193,12 +196,12 @@ src/
   provider/   anthropic · openai · ollama 传输层 + SSE 组帧
   http/       HTTPS 客户端（cpp-httplib，强制 OpenSSL）
   prompt/     系统提示组装（环境、记忆、技能目录）
-  runtime/    agent 循环 · 异步宿主 · 工作者线程池 · 唤醒信号 · 无头运行器
+  runtime/    agent 循环 · 异步宿主 · 工作者线程池 · 唤醒信号
   tool/       注册表、效果与权限策略、read、memory、skills、search_docs
   rag/        语料 · 分块 · BM25 · 嵌入 · RRF 混合 · 基准
-  ui/         事件循环、终端驱动、视图/屏幕、markdown 扫描、
-              输入编辑与布局、状态栏、重绘时钟、resize 监视
-tests/        36 个 gtest 二进制 + 虚拟终端 + 宽度判据
+  ui/         事件循环、终端驱动、语义屏幕、输入编辑、
+              用量投影、重绘时钟、resize 监视
+tests/        gtest 二进制 + 虚拟终端 + 宽度判据
 ```
 
 依赖经 FetchContent 固定版本：googletest、nlohmann_json、cpp-httplib ——
