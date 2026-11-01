@@ -20,6 +20,7 @@ struct SessionFacts {
     memory::Roots memory_roots;
     std::vector<fs::path> skill_roots;
     docs::DocsConfig docs;
+    bool allow_temporary_read_root{true};
 };
 
 [[nodiscard]]

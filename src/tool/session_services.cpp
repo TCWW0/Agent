@@ -65,7 +65,8 @@ SessionServices::SessionServices(
     SessionFacts facts,
     rag::EmbedBackend docs_backend,
     rag::TeiRerankTransport docs_rerank_transport)
-    : read_roots_{std::make_shared<detail::ReadRoots>(facts.workspace_root)}
+    : read_roots_{std::make_shared<detail::ReadRoots>(
+          facts.workspace_root, facts.allow_temporary_read_root)}
     , workspace_root_{read_roots_->workspace_root()}
     , memory_{std::make_shared<memory::MemoryStore>(std::move(facts.memory_roots))}
     , skills_{std::make_shared<skills::SkillEngine>(

@@ -326,8 +326,9 @@ TEST(AsyncHostTest, NativeCalculatorUsesSessionRuntimeAndContinues)
 
     ASSERT_EQ(2u, run.requests.size());
     const my_agent::Request& request = run.requests.front();
-    constexpr std::array<std::string_view, 6> expected_names{
-        "calculator", "read", "remember", "forget", "skill", "search_docs",
+    constexpr std::array<std::string_view, 7> expected_names{
+        "calculator", "read", "list_dir", "remember", "forget", "skill",
+        "search_docs",
     };
     ASSERT_EQ(expected_names.size(), request.tools.size());
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
@@ -533,7 +534,7 @@ TEST(AsyncHostTest, PreparationFailureBlocksWithoutCallingProvider)
 
     EXPECT_EQ(std::size_t{0}, provider_calls.load());
     const auto* blocked = std::get_if<my_agent::Blocked>(
-        &host.model().session.phase);
+        &host.model().phase);
     ASSERT_NE(nullptr, blocked);
     EXPECT_EQ(my_agent::BlockReason::ExplicitResumeRequired, blocked->reason);
     EXPECT_NE(std::string::npos, blocked->message.find("prompt unavailable"));

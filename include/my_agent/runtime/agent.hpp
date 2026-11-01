@@ -38,7 +38,7 @@ namespace my_agent{
     };
 
     struct CancelOperation {
-        OperationId operation;
+        OperationRef operation;
     };
 
     struct NoCommand{};

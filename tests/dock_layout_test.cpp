@@ -45,6 +45,16 @@ bool row_is_blank(const std::string& row)
 }
 
 [[nodiscard]]
+std::string dump_screen(const std::vector<std::string>& screen)
+{
+    std::string dump;
+    for (std::size_t row = 0; row < screen.size(); ++row) {
+        dump += std::to_string(row) + ":|" + screen[row] + "|\n";
+    }
+    return dump;
+}
+
+[[nodiscard]]
 my_agent::ui::ScreenConfig height_budget_screen()
 {
     my_agent::ui::ScreenConfig screen;
@@ -251,10 +261,10 @@ TEST(DockLayoutTest, FullscreenParentKeepsComposerRightBorderClosed)
     dock.status.phase.verb = kVerb;
 
     maya::ScrollState scroll;
-    maya::Conversation::Config conversation_config;
+    my_agent::ui::ConversationConfig conversation_config;
     conversation_config.fill_available_height = false;
     maya::Element conversation = (
-        maya::Conversation{std::move(conversation_config)}.build()
+        my_agent::ui::conversation_element(conversation_config)
             | width(kColumns)
     ).build();
     maya::Element transcript = maya::detail::vstack()
@@ -295,7 +305,8 @@ TEST(DockLayoutTest, CompactHeightKeepsTranscriptComposerAndActivityVisible)
 {
     const auto rendered = render_fullscreen(height_budget_screen(), 8);
     EXPECT_GE(find_row_containing(rendered, "TRANSCRIPT_ROW_S4"), 0)
-        << "compact layout must preserve a transcript row";
+        << "compact layout must preserve a transcript row\n"
+        << dump_screen(rendered);
     EXPECT_GE(find_row_containing(rendered, kDraft), 0);
     EXPECT_GE(find_row_containing(rendered, kVerb), 0);
     EXPECT_GE(find_row_containing(rendered, "Ctrl+End"), 0)
@@ -305,13 +316,15 @@ TEST(DockLayoutTest, CompactHeightKeepsTranscriptComposerAndActivityVisible)
 TEST(DockLayoutTest, ProgressivelyDropsGuidanceAndComposerFooter)
 {
     const auto no_guidance = render_fullscreen(height_budget_screen(), 7);
-    EXPECT_GE(find_row_containing(no_guidance, "TRANSCRIPT_ROW_S4"), 0);
+    EXPECT_GE(find_row_containing(no_guidance, "TRANSCRIPT_ROW_S4"), 0)
+        << dump_screen(no_guidance);
     EXPECT_GE(find_row_containing(no_guidance, kDraft), 0);
     EXPECT_GE(find_row_containing(no_guidance, kVerb), 0);
     EXPECT_EQ(find_row_containing(no_guidance, "Ctrl+End"), -1);
 
     const auto no_footer = render_fullscreen(height_budget_screen(), 6);
-    EXPECT_GE(find_row_containing(no_footer, "TRANSCRIPT_ROW_S4"), 0);
+    EXPECT_GE(find_row_containing(no_footer, "TRANSCRIPT_ROW_S4"), 0)
+        << dump_screen(no_footer);
     EXPECT_GE(find_row_containing(no_footer, kDraft), 0);
     EXPECT_GE(find_row_containing(no_footer, kVerb), 0);
     EXPECT_EQ(find_row_containing(no_footer, "send"), -1);

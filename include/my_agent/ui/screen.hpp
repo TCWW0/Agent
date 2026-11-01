@@ -28,6 +28,23 @@
 
 namespace my_agent::ui {
 
+// Project-owned host adapters. Maya remains the rendering backend; fields
+// that express my_agent policy live here instead of in a private Maya fork.
+struct ConversationConfig : maya::Conversation::Config {
+    bool fill_available_height = false;
+    bool compact_tail = false;
+};
+
+struct ComposerConfig : maya::Composer::Config {
+    bool solid_cell = false;
+    std::string queued_placeholder;
+};
+
+struct StatusBarConfig : maya::StatusBar::Config {
+    maya::Element request_usage;
+    maya::Element turn_usage;
+};
+
 struct TranscriptGuidanceConfig {
     struct Run {
         std::string text;
@@ -56,13 +73,13 @@ struct DockConfig {
     std::optional<maya::Permission::Config> permission;
     TranscriptGuidanceConfig transcript_guidance;
     std::optional<QueuePreviewConfig> queue_preview;
-    maya::Composer::Config composer;
-    maya::StatusBar::Config status;
+    ComposerConfig composer;
+    StatusBarConfig status;
 };
 
 // 语义屏幕。transcript 只装已结算的对话内容；一切「活着」的东西都在 dock。
 struct ScreenConfig {
-    maya::Conversation::Config transcript;
+    ConversationConfig transcript;
     DockConfig dock;
 };
 
@@ -71,6 +88,16 @@ struct ScreenConfig {
 [[nodiscard]]
 ScreenConfig project_screen(
     const Model& model, const UiState& ui, const maya::Theme& theme);
+
+// Translate the project-owned adapter configs into Maya element trees.
+[[nodiscard]]
+maya::Element conversation_element(const ConversationConfig& config);
+
+[[nodiscard]]
+maya::Element composer_element(const ComposerConfig& config);
+
+[[nodiscard]]
+maya::Element status_bar_element(const StatusBarConfig& config);
 
 // dock 的布局翻译：DockConfig → maya::Element。布局契约（issue #26 验收 2）：
 // permission slot（如有）居顶；composer 上方保留 breathing row 与 guidance row；

@@ -1,6 +1,7 @@
 #include "my_agent/ui/ui_loop.hpp"
 
 #include "my_agent/ui/input_editor.hpp"
+#include "my_agent/ui/maya_animation.hpp"
 #include "my_agent/ui/repaint_clock.hpp"
 #include "my_agent/ui/resize_watch.hpp"
 #include "my_agent/ui/screen.hpp"
@@ -94,7 +95,9 @@ std::size_t paste_line_count(std::string_view text) noexcept
 
 KeyOutcome apply_paste(std::string text, UiState& ui, const Model& model)
 {
-    if (std::holds_alternative<AwaitingPermission>(model.session.phase)) {
+    if (tool_activity_projection(model).kind
+            == ToolActivityProjection::Kind::Invalid
+        || std::holds_alternative<AwaitingPermission>(model.phase)) {
         return {};
     }
 
@@ -148,26 +151,24 @@ KeyOutcome apply_key(const Key& key, UiState& ui, const Model& model)
     }
 
     // 审批期间按键改变含义：这是 apply_key 需要看 model 的唯一理由。
-    // id 取自 pending_permission —— 审批的对象是某一次具体调用，用错 id 会批准
-    // 另一个工具。没有 pending id 时按键落回普通文本，而不是发一条无主的批准。
-    if (std::holds_alternative<AwaitingPermission>(model.session.phase)
-        && key.kind == Key::Kind::Text) {
-        if (pending_permission_call(model) == nullptr) {
+    // Permission phase owns the complete call reference. Validate it against
+    // the transcript before emitting a decision so a stale UI frame cannot
+    // approve a different tool execution.
+    if (const auto* pending = std::get_if<AwaitingPermission>(&model.phase);
+        pending != nullptr && key.kind == Key::Kind::Text) {
+        const ToolCall* call = resolve_tool_call(
+            model.domain.thread, pending->call);
+        if (call == nullptr || !call->is_pending()) {
             return {};
         }
-        const std::string& id = model.session.pending_permission->id;
         if (key.text == "y" || key.text == "Y") {
             return KeyOutcome{.msg = Msg{PermissionApprove{
-                .turn_id = model.session.pending_permission->turn_id,
-                .tool_exec_id = model.session.pending_permission->tool_exec_id,
-                .id = id,
+                .call = pending->call,
             }}};
         }
         if (key.text == "n" || key.text == "N") {
             return KeyOutcome{.msg = Msg{PermissionReject{
-                .turn_id = model.session.pending_permission->turn_id,
-                .tool_exec_id = model.session.pending_permission->tool_exec_id,
-                .id = id,
+                .call = pending->call,
             }}};
         }
         return {};  // 其他键在审批期间无意义，不该插进输入行
@@ -213,7 +214,7 @@ KeyOutcome apply_key(const Key& key, UiState& ui, const Model& model)
             return {};
 
         case Key::Kind::ResumeQueue:
-            if (std::holds_alternative<Blocked>(model.session.phase)
+            if (std::holds_alternative<Blocked>(model.phase)
                 && !model.session.queued_messages.empty()) {
                 return KeyOutcome{.msg = Msg{ResumeQueue{}}};
             }
@@ -227,10 +228,10 @@ KeyOutcome apply_key(const Key& key, UiState& ui, const Model& model)
 
         case Key::Kind::Interrupt:
             if (ui.input.empty()
-                && (std::holds_alternative<Streaming>(model.session.phase)
-                    || std::holds_alternative<Compacting>(model.session.phase)
-                    || std::holds_alternative<ExecutingTool>(model.session.phase)
-                    || std::holds_alternative<AwaitingPermission>(model.session.phase))) {
+                && (std::holds_alternative<Streaming>(model.phase)
+                    || std::holds_alternative<Compacting>(model.phase)
+                    || std::holds_alternative<ExecutingTool>(model.phase)
+                    || std::holds_alternative<AwaitingPermission>(model.phase))) {
                 return KeyOutcome{.msg = Msg{CancelActive{}}};
             }
             ui.input.clear();
@@ -284,7 +285,7 @@ bool run_ui(
     AnimationHostContext animation_context{.clock = &clock};
     // Install only after the tty gate. The scope covers the full UI loop and
     // restores Maya's previous host before run_ui returns.
-    maya::anim::AnimationHostScope animation_host{
+    MayaAnimationHostScope animation_host{
         &animation_context,
         &request_animation_frame,
         &request_animation_frame_after,
@@ -296,7 +297,7 @@ bool run_ui(
 
     const auto refresh_status = [&ui, &host, &status_provider] {
         const bool streaming = std::holds_alternative<Streaming>(
-            host.model().session.phase);
+            host.model().phase);
         const LiveTokenRate::Snapshot live = ui.live_token_rate.observe(
             host.model().session.stream_telemetry.output_bytes,
             host.model().session.stream_telemetry.generation,
@@ -351,6 +352,7 @@ bool run_ui(
         terminal.size(),
         writer
     ));
+    animation_host.flush();
 
     const int wake_fd = host.wake_fd();
     // 键盘 fd 由驱动给出，不能假定 STDIN_FILENO —— 假定会让驱动持有的 fd 被彻底忽略，
@@ -377,6 +379,7 @@ bool run_ui(
                 terminal.size(),
                 writer
             ));
+            animation_host.flush();
         }
 
         // 键盘固定在 [0]。唤醒与窗口变化按可用性依次追加 —— 哨兵（fd 为 -1）

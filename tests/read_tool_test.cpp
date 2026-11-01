@@ -37,274 +37,6 @@ public:
             if (fs::create_directory(path_, error)) {
                 return;
             }
-
-TEST(ReadToolTest, ExplicitRangeBypassesOutlineForLargeFile)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    std::string content{"# Project\n"};
-    for (int line = 1; line <= 3000; ++line) {
-        content += "ordinary filler line " + std::to_string(line) + "\n";
-    }
-    content += "class Widget {\npublic:\n    void run();\n};\n";
-    ScopedTextFile fixture{workspace.path() / "large.cpp", content};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto result = read.handler(
-        nlohmann::json{
-            {"path", "large.cpp"},
-            {"start_line", 3002},
-            {"end_line", 3004},
-        },
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_TRUE(result->text.starts_with(
-        "class Widget {\npublic:\n    void run();\n")) << result->text;
-    EXPECT_EQ(std::string::npos, result->text.find("# Outline"));
-}
-
-TEST(ReadToolTest, ReturnsPreviewForLargeFileWithoutRecognizableStructure)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    std::string content;
-    for (int line = 1; line <= 3000; ++line) {
-        content += "plain data row " + std::to_string(line) + "\n";
-    }
-    ASSERT_GT(content.size(), 32U * 1024U);
-    ScopedTextFile fixture{workspace.path() / "large.log", content};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto result = read.handler(
-        nlohmann::json{{"path", "large.log"}},
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_NE(std::string::npos, result->text.find("# First 1 KiB of large.log"));
-    EXPECT_NE(std::string::npos, result->text.find("plain data row 1\n"));
-    EXPECT_EQ(std::string::npos, result->text.find("plain data row 3000\n"));
-    EXPECT_NE(std::string::npos, result->text.find("offset/limit"));
-}
-
-TEST(ReadToolTest, ChecksFileSizeBeforeBinaryContent)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    constexpr auto one_mib = 1024U * 1024U;
-    std::string content(one_mib + 1U, 'x');
-    content.front() = '\0';
-    ScopedTextFile fixture{workspace.path() / "oversized.dat", content};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto result = read.handler(
-        nlohmann::json{{"path", "oversized.dat"}},
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(my_agent::tool::ErrorKind::TooLarge, result.error().kind);
-}
-
-TEST(ReadToolTest, ReturnsOutlineForLargeFileWithoutExplicitRange)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    std::string content{"# Project\n"};
-    for (int line = 1; line <= 3000; ++line) {
-        content += "ordinary filler line " + std::to_string(line) + "\n";
-    }
-    content += "class Widget {\npublic:\n    void run();\n};\n";
-    ASSERT_GT(content.size(), 32U * 1024U);
-    ScopedTextFile fixture{workspace.path() / "large.cpp", content};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto result = read.handler(
-        nlohmann::json{{"path", "large.cpp"}},
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_NE(std::string::npos, result->text.find("# Outline of large.cpp"));
-    EXPECT_NE(std::string::npos, result->text.find("[L1] # Project"));
-    EXPECT_NE(
-        std::string::npos,
-        result->text.find("[L3002] class Widget {")
-    );
-    EXPECT_EQ(
-        std::string::npos,
-        result->text.find("ordinary filler line 1")
-    );
-    EXPECT_NE(std::string::npos, result->text.find("offset/limit"));
-}
-
-TEST(ReadToolTest, SupportsStartLineAndEndLine)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    ScopedTextFile fixture{
-        workspace.path() / "lines.txt",
-        "one\ntwo\nthree\nfour\nfive\nsix\n"
-    };
-
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-    const auto result = read.handler(
-        nlohmann::json{
-            {"path", "lines.txt"},
-            {"start_line", 2},
-            {"end_line", 4},
-        },
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_TRUE(result->text.starts_with("two\nthree\nfour\n"))
-        << result->text;
-    EXPECT_EQ(std::string::npos, result->text.find("one\n"));
-    EXPECT_EQ(std::string::npos, result->text.find("five\n"));
-}
-
-TEST(ReadToolTest, RejectsConflictingRangeAliases)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    ScopedTextFile fixture{
-        workspace.path() / "lines.txt",
-        "one\ntwo\nthree\nfour\n"
-    };
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto conflicting_start = read.handler(
-        nlohmann::json{
-            {"path", "lines.txt"},
-            {"offset", 2},
-            {"start_line", 3},
-        },
-        my_agent::tool::ToolExecutionContext{}
-    );
-    ASSERT_FALSE(conflicting_start.has_value());
-    EXPECT_EQ(
-        my_agent::tool::ErrorKind::InvalidArgs,
-        conflicting_start.error().kind
-    );
-
-    const auto conflicting_end = read.handler(
-        nlohmann::json{
-            {"path", "lines.txt"},
-            {"offset", 2},
-            {"limit", 2},
-            {"end_line", 4},
-        },
-        my_agent::tool::ToolExecutionContext{}
-    );
-    ASSERT_FALSE(conflicting_end.has_value());
-    EXPECT_EQ(
-        my_agent::tool::ErrorKind::InvalidArgs,
-        conflicting_end.error().kind
-    );
-}
-
-TEST(ReadToolTest, RejectsInvalidRangeArguments)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    for (const nlohmann::json& args : {
-        nlohmann::json{{"path", "missing.txt"}, {"offset", 0}},
-        nlohmann::json{{"path", "missing.txt"}, {"limit", -1}},
-        nlohmann::json{{"path", "missing.txt"}, {"start_line", "two"}},
-        nlohmann::json{
-            {"path", "missing.txt"},
-            {"start_line", 4},
-            {"end_line", 3},
-        },
-    }) {
-        const auto result = read.handler(
-            args,
-            my_agent::tool::ToolExecutionContext{}
-        );
-        ASSERT_FALSE(result.has_value()) << args.dump();
-        EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, result.error().kind)
-            << args.dump();
-    }
-}
-
-TEST(ReadToolTest, DefaultsToAtMostTwoThousandLines)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    std::string content;
-    for (int line = 1; line <= 2001; ++line) {
-        content += "line-" + std::to_string(line) + "\n";
-    }
-    ScopedTextFile fixture{workspace.path() / "many-lines.txt", content};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-
-    const auto result = read.handler(
-        nlohmann::json{{"path", "many-lines.txt"}},
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_NE(std::string::npos, result->text.find("line-2000\n"));
-    EXPECT_EQ(std::string::npos, result->text.find("line-2001\n"));
-    EXPECT_NE(std::string::npos, result->text.find("showing lines 1-2000"));
-}
-
-TEST(ReadToolTest, DescriptorDeclaresRangeArguments)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-    const auto& properties = read.descriptor.input_schema.at("properties");
-
-    for (const std::string_view name : {
-        "offset", "limit", "start_line", "end_line"}) {
-        ASSERT_TRUE(properties.contains(name)) << name;
-        EXPECT_EQ("integer", properties.at(name).at("type")) << name;
-        EXPECT_EQ(1, properties.at(name).at("minimum")) << name;
-    }
-}
-
-TEST(ReadToolTest, ReturnsRequestedOffsetAndLimit)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    ScopedTextFile fixture{
-        workspace.path() / "lines.txt",
-        "one\ntwo\nthree\nfour\nfive\nsix\n"
-    };
-
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-    const auto result = read.handler(
-        nlohmann::json{
-            {"path", "lines.txt"},
-            {"offset", 2},
-            {"limit", 3},
-        },
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_TRUE(result.has_value()) << result.error().render();
-    EXPECT_TRUE(result->text.starts_with("two\nthree\nfour\n"))
-        << result->text;
-    EXPECT_EQ(std::string::npos, result->text.find("one\n"));
-    EXPECT_EQ(std::string::npos, result->text.find("five\n"));
-}
-
-TEST(ReadToolTest, RejectsOversizedFileAsTooLarge)
-{
-    ScopedDirectory workspace{fs::current_path()};
-    constexpr auto one_mib = 1024U * 1024U;
-    ScopedTextFile fixture{
-        workspace.path() / "oversized.txt",
-        std::string(one_mib + 1U, 'x')
-    };
-
-    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
-    const auto result = read.handler(
-        nlohmann::json{{"path", "oversized.txt"}},
-        my_agent::tool::ToolExecutionContext{}
-    );
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(my_agent::tool::ErrorKind::TooLarge, result.error().kind);
-    EXPECT_TRUE(result.error().render().starts_with("[too large] "))
-        << result.error().render();
-}
             if (error && error != std::errc::file_exists) {
                 throw std::runtime_error{
                     "failed to create read tool fixture directory: "
@@ -436,7 +168,8 @@ TEST(ReadToolTest, RejectsExistingFileOutsideWorkspace)
         "outside workspace content\n"
     };
 
-    const auto read = my_agent::tool::detail::make_read_tool(workspace_root);
+    const auto read = my_agent::tool::detail::make_read_tool(
+        workspace_root, {}, /*allow_temporary_root=*/false);
     const auto result = read.handler(
         nlohmann::json{{"path", fixture.path().string()}},
         my_agent::tool::ToolExecutionContext{});
@@ -458,7 +191,8 @@ TEST(ReadToolTest, RejectsMissingPathOutsideWorkspace)
     const fs::path missing_path = fixture_directory.path() / "missing.txt";
     ASSERT_FALSE(fs::exists(missing_path));
 
-    const auto read = my_agent::tool::detail::make_read_tool(workspace_root);
+    const auto read = my_agent::tool::detail::make_read_tool(
+        workspace_root, {}, /*allow_temporary_root=*/false);
     const auto result = read.handler(
         nlohmann::json{{"path", missing_path.string()}},
         my_agent::tool::ToolExecutionContext{});
@@ -480,7 +214,10 @@ TEST(ReadToolTest, ExistingRegistrationObservesSessionReadRootAddition)
     ScopedTextFile fixture{shared / "note.txt", "shared content\n"};
 
     my_agent::tool::SessionServices services{
-        my_agent::tool::SessionFacts{.workspace_root = workspace}};
+        my_agent::tool::SessionFacts{
+            .workspace_root = workspace,
+            .allow_temporary_read_root = false,
+        }};
     const auto registrations = services.registrations();
     const auto read = std::ranges::find_if(
         registrations,
@@ -568,7 +305,10 @@ TEST(ReadToolTest, InvalidExtraRootDoesNotWidenSessionAccess)
     fs::create_directories(workspace);
     ScopedTextFile fixture{fixture_directory.path() / "secret.txt", "secret\n"};
     my_agent::tool::SessionServices services{
-        my_agent::tool::SessionFacts{.workspace_root = workspace}};
+        my_agent::tool::SessionFacts{
+            .workspace_root = workspace,
+            .allow_temporary_read_root = false,
+        }};
     const auto registrations = services.registrations();
     const auto read = std::ranges::find_if(
         registrations,
@@ -605,7 +345,8 @@ TEST(ReadToolTest, SymlinkInsideWorkspaceCannotReadOutsideAllowedRoots)
     fs::create_directories(workspace);
     ScopedTextFile outside{fixture_directory.path() / "outside.txt", "outside\n"};
     fs::create_symlink(outside.path(), workspace / "escape.txt");
-    const auto read = my_agent::tool::detail::make_read_tool(workspace);
+    const auto read = my_agent::tool::detail::make_read_tool(
+        workspace, {}, /*allow_temporary_root=*/false);
 
     const auto result = read.handler(
         nlohmann::json{{"path", "escape.txt"}},
@@ -651,4 +392,339 @@ TEST(ReadToolTest, RejectsBinaryFileAsBinary)
     EXPECT_EQ(my_agent::tool::ErrorKind::Binary, result.error().kind);
     EXPECT_TRUE(result.error().render().starts_with("[binary] "))
         << result.error().render();
+}
+
+TEST(ReadToolTest, RejectsOversizedFileAsTooLarge)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    constexpr auto one_mib = 1024U * 1024U;
+    ScopedTextFile fixture{
+        workspace.path() / "oversized.txt",
+        std::string(one_mib + 1U, 'x')
+    };
+
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+    const auto result = read.handler(
+        nlohmann::json{{"path", "oversized.txt"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(my_agent::tool::ErrorKind::TooLarge, result.error().kind);
+    EXPECT_TRUE(result.error().render().starts_with("[too large] "))
+        << result.error().render();
+}
+
+TEST(ReadToolTest, ReturnsRequestedOffsetAndLimit)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    ScopedTextFile fixture{
+        workspace.path() / "lines.txt",
+        "one\ntwo\nthree\nfour\nfive\nsix\n"
+    };
+
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+    const auto result = read.handler(
+        nlohmann::json{
+            {"path", "lines.txt"},
+            {"offset", 2},
+            {"limit", 3},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_TRUE(result->text.starts_with("two\nthree\nfour\n"))
+        << result->text;
+    EXPECT_EQ(std::string::npos, result->text.find("one\n"));
+    EXPECT_EQ(std::string::npos, result->text.find("five\n"));
+}
+
+TEST(ReadToolTest, SupportsStartLineAndEndLine)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    ScopedTextFile fixture{
+        workspace.path() / "lines.txt",
+        "one\ntwo\nthree\nfour\nfive\nsix\n"
+    };
+
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+    const auto result = read.handler(
+        nlohmann::json{
+            {"path", "lines.txt"},
+            {"start_line", 2},
+            {"end_line", 4},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_TRUE(result->text.starts_with("two\nthree\nfour\n"))
+        << result->text;
+    EXPECT_EQ(std::string::npos, result->text.find("one\n"));
+    EXPECT_EQ(std::string::npos, result->text.find("five\n"));
+}
+
+TEST(ReadToolTest, RejectsConflictingRangeAliases)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    ScopedTextFile fixture{
+        workspace.path() / "lines.txt",
+        "one\ntwo\nthree\nfour\n"
+    };
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto conflicting_start = read.handler(
+        nlohmann::json{
+            {"path", "lines.txt"},
+            {"offset", 2},
+            {"start_line", 3},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+    ASSERT_FALSE(conflicting_start.has_value());
+    EXPECT_EQ(
+        my_agent::tool::ErrorKind::InvalidArgs,
+        conflicting_start.error().kind
+    );
+
+    const auto conflicting_end = read.handler(
+        nlohmann::json{
+            {"path", "lines.txt"},
+            {"offset", 2},
+            {"limit", 2},
+            {"end_line", 4},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+    ASSERT_FALSE(conflicting_end.has_value());
+    EXPECT_EQ(
+        my_agent::tool::ErrorKind::InvalidArgs,
+        conflicting_end.error().kind
+    );
+}
+
+TEST(ReadToolTest, RejectsInvalidRangeArguments)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    for (const nlohmann::json& args : {
+        nlohmann::json{{"path", "missing.txt"}, {"offset", 0}},
+        nlohmann::json{{"path", "missing.txt"}, {"limit", -1}},
+        nlohmann::json{{"path", "missing.txt"}, {"start_line", "two"}},
+        nlohmann::json{
+            {"path", "missing.txt"},
+            {"start_line", 4},
+            {"end_line", 3},
+        },
+    }) {
+        const auto result = read.handler(
+            args,
+            my_agent::tool::ToolExecutionContext{}
+        );
+        ASSERT_FALSE(result.has_value()) << args.dump();
+        EXPECT_EQ(my_agent::tool::ErrorKind::InvalidArgs, result.error().kind)
+            << args.dump();
+    }
+}
+
+TEST(ReadToolTest, DefaultsToAtMostTwoThousandLines)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    std::string content;
+    for (int line = 1; line <= 2001; ++line) {
+        content += "line-" + std::to_string(line) + "\n";
+    }
+    ScopedTextFile fixture{workspace.path() / "many-lines.txt", content};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{{"path", "many-lines.txt"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(std::string::npos, result->text.find("line-2000\n"));
+    EXPECT_EQ(std::string::npos, result->text.find("line-2001\n"));
+    EXPECT_NE(std::string::npos, result->text.find("showing lines 1-2000"));
+}
+
+TEST(ReadToolTest, DescriptorDeclaresRangeArguments)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+    const auto& properties = read.descriptor.input_schema.at("properties");
+
+    for (const std::string_view name : {
+        "offset", "limit", "start_line", "end_line"}) {
+        ASSERT_TRUE(properties.contains(name)) << name;
+        EXPECT_EQ("integer", properties.at(name).at("type")) << name;
+        EXPECT_EQ(1, properties.at(name).at("minimum")) << name;
+    }
+}
+
+TEST(ReadToolTest, ReturnsOutlineForLargeFileWithoutExplicitRange)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    std::string content{
+        "# Project\n"
+        "namespace demo {\n"
+        "struct Record {};\n"
+        "enum class Mode { Active };\n"
+        "const int answer = 42;\n"
+    };
+    for (int line = 1; line <= 3000; ++line) {
+        content += "ordinary filler line " + std::to_string(line) + "\n";
+    }
+    content += "class Widget {\npublic:\n    void run();\n};\n";
+    ASSERT_GT(content.size(), 32U * 1024U);
+    ScopedTextFile fixture{workspace.path() / "large.cpp", content};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{{"path", "large.cpp"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(std::string::npos, result->text.find("# Outline of large.cpp"));
+    EXPECT_NE(std::string::npos, result->text.find("[L1] # Project"));
+    EXPECT_NE(std::string::npos, result->text.find("[L2] namespace demo {"));
+    EXPECT_NE(std::string::npos, result->text.find("[L3] struct Record {};"));
+    EXPECT_NE(
+        std::string::npos,
+        result->text.find("[L4] enum class Mode { Active };")
+    );
+    EXPECT_NE(
+        std::string::npos,
+        result->text.find("[L5] const int answer = 42;")
+    );
+    EXPECT_NE(
+        std::string::npos,
+        result->text.find("[L3006] class Widget {")
+    );
+    EXPECT_NE(
+        std::string::npos,
+        result->text.find("[L3008] void run();")
+    );
+    EXPECT_EQ(
+        std::string::npos,
+        result->text.find("ordinary filler line 1")
+    );
+    EXPECT_NE(std::string::npos, result->text.find("offset/limit"));
+}
+
+TEST(ReadToolTest, ExplicitRangeBypassesOutlineForLargeFile)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    std::string content{
+        "# Project\n"
+        "namespace demo {\n"
+        "struct Record {};\n"
+        "enum class Mode { Active };\n"
+        "const int answer = 42;\n"
+    };
+    for (int line = 1; line <= 3000; ++line) {
+        content += "ordinary filler line " + std::to_string(line) + "\n";
+    }
+    content += "class Widget {\npublic:\n    void run();\n};\n";
+    ScopedTextFile fixture{workspace.path() / "large.cpp", content};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{
+            {"path", "large.cpp"},
+            {"start_line", 3006},
+            {"end_line", 3008},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_TRUE(result->text.starts_with(
+        "class Widget {\npublic:\n    void run();\n")) << result->text;
+    EXPECT_EQ(std::string::npos, result->text.find("# Outline"));
+}
+
+TEST(ReadToolTest, ReturnsPreviewForLargeFileWithoutRecognizableStructure)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    std::string content;
+    for (int line = 1; line <= 3000; ++line) {
+        content += "plain data row " + std::to_string(line) + "\n";
+    }
+    ASSERT_GT(content.size(), 32U * 1024U);
+    ScopedTextFile fixture{workspace.path() / "large.log", content};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{{"path", "large.log"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(std::string::npos, result->text.find("# First 1 KiB of large.log"));
+    EXPECT_NE(std::string::npos, result->text.find("plain data row 1\n"));
+    EXPECT_EQ(std::string::npos, result->text.find("plain data row 3000\n"));
+    EXPECT_NE(std::string::npos, result->text.find("offset/limit"));
+}
+
+TEST(ReadToolTest, ChecksFileSizeBeforeBinaryContent)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    constexpr auto one_mib = 1024U * 1024U;
+    std::string content(one_mib + 1U, 'x');
+    content.front() = '\0';
+    ScopedTextFile fixture{workspace.path() / "oversized.dat", content};
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{{"path", "oversized.dat"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(my_agent::tool::ErrorKind::TooLarge, result.error().kind);
+}
+
+TEST(ReadToolTest, AllowsFileAtOneMiBSize)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    constexpr auto one_mib = 1024U * 1024U;
+    ScopedTextFile fixture{
+        workspace.path() / "limit.txt",
+        std::string(one_mib, 'x')
+    };
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{{"path", "limit.txt"}},
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_NE(std::string::npos, result->text.find("# First 1 KiB of limit.txt"));
+}
+
+TEST(ReadToolTest, RangeIncludesFinalLineWithoutTrailingNewline)
+{
+    ScopedDirectory workspace{fs::current_path()};
+    ScopedTextFile fixture{
+        workspace.path() / "lines.txt",
+        "one\ntwo\nthree"
+    };
+    const auto read = my_agent::tool::detail::make_read_tool(workspace.path());
+
+    const auto result = read.handler(
+        nlohmann::json{
+            {"path", "lines.txt"},
+            {"offset", 3},
+            {"limit", 1},
+        },
+        my_agent::tool::ToolExecutionContext{}
+    );
+
+    ASSERT_TRUE(result.has_value()) << result.error().render();
+    EXPECT_TRUE(result->text.starts_with("three")) << result->text;
 }

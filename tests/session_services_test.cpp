@@ -107,6 +107,7 @@ protected:
                     .root = base / "docs",
                     .root_missing = false,
                 },
+            .allow_temporary_read_root = false,
         };
     }
 

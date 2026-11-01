@@ -64,59 +64,34 @@ struct AsyncHost::OperationState {
 
 namespace {
 
-Msg bind_stream_identity(
-    Msg msg, TurnId turn_id,
-    StreamId stream_id, RequestFingerprint request_fingerprint)
-{
-    std::visit(
-        [turn_id, stream_id, request_fingerprint = std::move(
-            request_fingerprint)](auto& event) {
-            using Event = std::decay_t<decltype(event)>;
-            if constexpr (std::is_same_v<Event, StreamTextDelta>
-                || std::is_same_v<Event, StreamFinished>
-                || std::is_same_v<Event, StreamError>) {
-                event.turn_id = turn_id;
-                event.stream_id = stream_id;
-            } else if constexpr (std::is_same_v<Event, RequestUsage>) {
-                event.operation = OperationRef{
-                    .owner = turn_id,
-                    .kind = OperationKind::Stream,
-                    .value = stream_id.value,
-                };
-                event.request_fingerprint = request_fingerprint;
-            }
-        },
-        msg);
-    return msg;
-}
-
 Msg resolve_stream_event(
-    ProviderEvent event, TurnId turn_id, StreamId stream_id,
-    RequestFingerprint request_fingerprint,
+    ProviderEvent event,
+    StreamRef ref,
+    const RequestFingerprint& request_fingerprint,
     const tool::ToolRuntime& runtime)
 {
     return std::visit(
-        [turn_id, stream_id,
-         request_fingerprint = std::move(request_fingerprint), &runtime]
-        (auto&& provider_event) -> Msg {
+        [ref, &request_fingerprint, &runtime](auto&& provider_event) -> Msg {
             using Event = std::decay_t<decltype(provider_event)>;
             if constexpr (std::is_same_v<Event, StreamToolCall>) {
-                provider_event.turn_id = turn_id;
-                provider_event.stream_id = stream_id;
                 const auto resolution = runtime.resolve(provider_event.name);
                 ToolCallResolution resolved = resolution
                     ? ToolCallResolution{*resolution}
                     : ToolCallResolution{resolution.error()};
                 return Msg{ResolvedStreamToolCall{
-                    StreamRef{.turn_id = provider_event.turn_id, .stream_id = provider_event.stream_id},
+                    ref,
                     std::move(provider_event.id),
                     std::move(provider_event.name),
                     std::move(provider_event.args),
                     std::move(resolved),
                 }};
+            } else if constexpr (std::is_same_v<Event, RequestUsage>) {
+                provider_event.operation = ref;
+                provider_event.request_fingerprint = request_fingerprint;
+                return Msg{std::move(provider_event)};
             } else {
-                Msg msg{std::forward<Event>(provider_event)};
-                return bind_stream_identity(std::move(msg), turn_id, stream_id, request_fingerprint);
+                provider_event.ref = ref;
+                return Msg{std::move(provider_event)};
             }
         },
         std::move(event)
@@ -147,11 +122,7 @@ Msg bind_compaction_identity(
                     .message = std::move(event.message),
                 }};
             } else if constexpr (std::is_same_v<Event, RequestUsage>) {
-                event.operation = OperationRef{
-                    .owner = compaction_id,
-                    .kind = OperationKind::Compaction,
-                    .value = compaction_id.value,
-                };
+                event.operation = compaction_id;
                 event.request_fingerprint = std::move(request_fingerprint);
                 bound = Msg{std::move(event)};
             }
@@ -191,10 +162,8 @@ Msg bind_compaction_provider_event(
 
 AsyncHost::AsyncHost(
     StreamEffect stream,
-    std::shared_ptr<const tool::ToolRuntime> runtime,
-    ToolExecEffect execute_tool)
+    std::shared_ptr<const tool::ToolRuntime> runtime)
     : stream_(std::move(stream)),
-      execute_tool_(std::move(execute_tool)),
       tool_runtime_(std::move(runtime)),
       wake_(std::make_shared<WakeSignal>()),
       inbox_(std::make_shared<InboxState>(wake_))
@@ -205,39 +174,30 @@ AsyncHost::AsyncHost(
 }
 
 std::shared_ptr<AsyncHost::OperationState> AsyncHost::begin_operation(
-    OperationId operation)
+    OperationRef ref)
 {
+    invalidate_current_operation();
     auto state = std::make_shared<OperationState>();
-    std::lock_guard<std::mutex> lock{operations_mutex_};
-    if (const auto it = operations_.find(operation); it != operations_.end()) {
-        it->second->cancelled.store(true, std::memory_order_release);
-    }
-    operations_[operation] = state;
+    current_operation_ = CurrentOperation{
+        .ref = std::move(ref),
+        .state = state,
+    };
     return state;
 }
 
-void AsyncHost::cancel_operation(OperationId operation) noexcept
+void AsyncHost::invalidate_current_operation() noexcept
 {
-    std::lock_guard<std::mutex> lock{operations_mutex_};
-    if (const auto it = operations_.find(operation); it != operations_.end()) {
-        it->second->cancelled.store(true, std::memory_order_release);
+    if (current_operation_) {
+        current_operation_->state->cancelled.store(
+            true, std::memory_order_release);
+        current_operation_.reset();
     }
-}
-
-void AsyncHost::retire_operation(OperationId operation) noexcept
-{
-    std::lock_guard<std::mutex> lock{operations_mutex_};
-    operations_.erase(operation);
 }
 
 void AsyncHost::shutdown()
 {
     pool_.request_stop();
-    std::lock_guard<std::mutex> lock{operations_mutex_};
-    for (const auto& [operation, state] : operations_) {
-        static_cast<void>(operation);
-        state->cancelled.store(true, std::memory_order_release);
-    }
+    wake_->signal();
 }
 
 AsyncHost::~AsyncHost()
@@ -298,49 +258,8 @@ int AsyncHost::wake_fd() const noexcept
 
 void AsyncHost::process_msg(Msg msg)
 {
-    std::visit(
-        [this](const auto& event) {
-            using Event = std::decay_t<decltype(event)>;
-            if constexpr (std::is_same_v<Event, StreamFinished>
-                || std::is_same_v<Event, StreamError>) {
-                if (event.turn_id.value != 0 || event.stream_id.value != 0) {
-                    retire_operation(OperationId{
-                        .turn_id = event.turn_id,
-                        .kind = OperationKind::Stream,
-                        .value = event.stream_id.value,
-                    });
-                }
-            } else if constexpr (
-                std::is_same_v<Event, CompactionFinished>
-                || std::is_same_v<Event, CompactionError>) {
-                if (event.compaction_id.value != 0) {
-                    retire_operation(OperationId{
-                        .turn_id = {},
-                        .kind = OperationKind::Compaction,
-                        .value = event.compaction_id.value,
-                    });
-                }
-            }
-        },
-        msg);
-    std::optional<ToolCallRef> reported_call;
-    if (const auto* tool_report = std::get_if<ToolExecOutput>(&msg)) {
-        reported_call = tool_report->call;
-    }
-    Step step = std::holds_alternative<SetRequestPolicy>(msg)
-        ? update(current_model_, std::move(msg))
-        : update(std::move(current_model_), std::move(msg));
+    Step step = update(std::move(current_model_), std::move(msg));
     current_model_ = std::move(step.model);
-    if (reported_call && reported_call->tool_exec_id.value != 0) {
-        const OperationId reported_operation = tool_operation_id(*reported_call);
-        const auto* executing_after =
-            std::get_if<ExecutingTool>(&current_model_.phase);
-        const bool operation_still_active = executing_after != nullptr
-            && tool_operation_id(executing_after->call) == reported_operation;
-        if (!operation_still_active) {
-            retire_operation(reported_operation);
-        }
-    }
     std::visit(
         [this](auto&& command) {
             execute_cmd(std::move(command));
@@ -366,9 +285,7 @@ void AsyncHost::execute_cmd(CancelOperation command)
 
 void AsyncHost::execute_cmd(PrepareRequest command)
 {
-    if (command.supersedes) {
-        cancel_operation(*command.supersedes);
-    }
+    invalidate_current_operation();
     try {
         PreparedRequestSnapshot snapshot = prepare_request_snapshot(
             std::move(command.request),
@@ -376,8 +293,6 @@ void AsyncHost::execute_cmd(PrepareRequest command)
             system_prompt_provider_
                 ? std::optional<std::string>{system_prompt_provider_()}
                 : std::nullopt,
-            command.provider_name,
-            command.provider_model,
             command.policy,
             command.ledger);
 
@@ -406,12 +321,8 @@ void AsyncHost::execute_cmd(StartCompaction command)
     std::stop_token token = pool_.stop_token();
     const CompactionId compaction_id = command.compaction_id;
     const RequestFingerprint request_fingerprint = command.request_fingerprint;
-    const OperationId operation{
-        .turn_id = {},
-        .kind = OperationKind::Compaction,
-        .value = compaction_id.value,
-    };
-    const std::shared_ptr<OperationState> state = begin_operation(operation);
+    const std::shared_ptr<OperationState> state =
+        begin_operation(OperationRef{compaction_id});
 
     pool_.task(
         [
@@ -474,22 +385,13 @@ void AsyncHost::execute_cmd(StartCompaction command)
 
 void AsyncHost::execute_cmd(StartStream command)
 {
-    if (command.supersedes) {
-        cancel_operation(*command.supersedes);
-    }
-
-    const OperationId operation{
-        .turn_id = command.turn_id,
-        .kind = OperationKind::Stream,
-        .value = command.stream_id.value,
-    };
-    const std::shared_ptr<OperationState> state = begin_operation(operation);
+    const StreamRef ref = command.ref;
+    const std::shared_ptr<OperationState> state =
+        begin_operation(OperationRef{ref});
     StreamEffect stream = stream_;
     std::shared_ptr<InboxState> inbox = inbox_;
     std::shared_ptr<const tool::ToolRuntime> tool_runtime = tool_runtime_;
     std::stop_token token = pool_.stop_token();
-    const TurnId turn_id = command.turn_id;
-    const StreamId stream_id = command.stream_id;
     const RequestFingerprint request_fingerprint = command.request_fingerprint;
 
     pool_.task(
@@ -500,9 +402,7 @@ void AsyncHost::execute_cmd(StartStream command)
             tool_runtime,
             request = std::move(command.request),
             state,
-            operation,
-            turn_id,
-            stream_id,
+            ref,
             request_fingerprint
         ]() mutable {
             const auto terminal_posted =
@@ -512,8 +412,7 @@ void AsyncHost::execute_cmd(StartStream command)
                 token,
                 state,
                 tool_runtime,
-                turn_id,
-                stream_id,
+                ref,
                 request_fingerprint,
                 terminal_posted
             ](ProviderEvent event) mutable {
@@ -534,7 +433,7 @@ void AsyncHost::execute_cmd(StartStream command)
                     return;
                 }
                 inbox->post(resolve_stream_event(
-                    std::move(event), turn_id, stream_id,
+                    std::move(event), ref,
                     request_fingerprint, *tool_runtime));
             };
 
@@ -557,9 +456,8 @@ void AsyncHost::execute_cmd(StartStream command)
 
 void AsyncHost::execute_cmd(RunTool command)
 {
-    const OperationId operation = tool_operation_id(command.call);
-
-    const std::shared_ptr<OperationState> state = begin_operation(operation);
+    const std::shared_ptr<OperationState> state =
+        begin_operation(OperationRef{command.call});
 
     std::shared_ptr<InboxState> inbox = inbox_;
     std::shared_ptr<const tool::ToolRuntime> tool_runtime = tool_runtime_;
@@ -567,7 +465,6 @@ void AsyncHost::execute_cmd(RunTool command)
 
     pool_.task_isolated(
         [
-            execute_tool = std::move(execute_tool),
             inbox = std::move(inbox),
             tool_runtime = std::move(tool_runtime),
             command = std::move(command),
@@ -588,12 +485,10 @@ void AsyncHost::execute_cmd(RunTool command)
             };
             tool::ExecResult result;
             try {
-                if (execute_tool) {
-                    result = execute_tool(command.ref, command.args, context);
-                } else {
-                    result = tool_runtime->execute(
-                        command.ref, command.args, context);
-                }
+                // ToolRuntime converts handler exceptions. This guard covers
+                // errors in runtime invocation before a result exists.
+                result = tool_runtime->execute(
+                    command.ref, command.args, context);
             } catch (const std::exception& error) {
                 result = std::unexpected(tool::ToolError{
                     .kind = tool::ErrorKind::ExecutionFailed,

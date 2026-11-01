@@ -130,7 +130,8 @@ TEST(ListDirToolTest, UsesSessionReadRootsAndBlocksSymlinkEscapes)
     fs::create_directory_symlink(denied, workspace / "escape", link_error);
     ASSERT_FALSE(link_error) << link_error.message();
 
-    auto roots = std::make_shared<my_agent::tool::detail::ReadRoots>(workspace);
+    auto roots = std::make_shared<my_agent::tool::detail::ReadRoots>(
+        workspace, /*allow_temporary_root=*/false);
     ASSERT_TRUE(roots->add(allowed).has_value());
     const auto list_dir = my_agent::tool::detail::make_list_dir_tool(std::move(roots));
 

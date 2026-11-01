@@ -428,10 +428,13 @@ ExecResult execute_read(const ReadRoots& roots, const nlohmann::json& args)
 }
 } // namespace
 
-RegisteredTool make_read_tool(std::filesystem::path workspace_root,
-                              std::vector<std::filesystem::path> allowed_roots)
+RegisteredTool make_read_tool(
+    std::filesystem::path workspace_root,
+    std::vector<std::filesystem::path> allowed_roots,
+    bool allow_temporary_root)
 {
-    auto roots = std::make_shared<ReadRoots>(workspace_root);
+    auto roots = std::make_shared<ReadRoots>(
+        workspace_root, allow_temporary_root);
     for (const fs::path& allowed : allowed_roots) {
         const auto added = roots->add(allowed);
         if (!added) {

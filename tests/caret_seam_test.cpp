@@ -1,4 +1,5 @@
 #include "my_agent/ui/screen.hpp"
+#include "my_agent/ui/maya_animation.hpp"
 #include "virtual_terminal.hpp"
 
 #include <maya/core/anim_clock.hpp>
@@ -238,7 +239,7 @@ TEST(CaretSeamTest, SolidCellDoesNotScheduleASeparateBlinkAnimation)
     ui.cursor = kCursorOffset;
 
     int requests = 0;
-    maya::anim::AnimationHostScope host{
+    my_agent::ui::MayaAnimationHostScope host{
         &requests,
         &count_caret_animation,
         &count_caret_delayed_animation,

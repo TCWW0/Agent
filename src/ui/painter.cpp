@@ -8,6 +8,7 @@
 #include <maya/render/serialize.hpp>
 #include <maya/widget/conversation.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,9 +23,22 @@ maya::Element build_fullscreen_element(
 {
     using namespace maya::dsl;
 
+    maya::Element dock = dock_element_for_height(
+        screen.dock, size.columns, size.rows);
+    const int dock_rows = maya::measure_element(
+        dock, std::max(1, size.columns)).height.value;
+
+    ConversationConfig transcript_config = screen.transcript;
+    if (size.rows - dock_rows <= 3 && !transcript_config.turns.empty()) {
+        // A normal Turn spends two rows on header + breathing space. In a
+        // one/two-row viewport that leaves only a rail visible even at the
+        // scroll tail. Compact only the live tail to the public continuation
+        // form so the user's last content remains observable; older turns
+        // keep their full geometry and the historical scroll range.
+        transcript_config.compact_tail = true;
+    }
     maya::Element conversation = (
-        maya::Conversation{screen.transcript}.build()
-            | width(size.columns)
+        conversation_element(transcript_config) | width(size.columns)
     ).build();
     maya::Element scroll_content = v(std::move(conversation)).build();
     maya::Element transcript = maya::detail::vstack()
@@ -42,8 +56,7 @@ maya::Element build_fullscreen_element(
         .overflow(maya::Overflow::Hidden)
         (
             std::move(transcript),
-            dock_element_for_height(screen.dock, size.columns, size.rows)
-                | shrink(0.0f)
+            std::move(dock) | shrink(0.0f)
         );
 }
 

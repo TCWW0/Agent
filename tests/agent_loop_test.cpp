@@ -26,6 +26,20 @@ my_agent::Message message(
     };
 }
 
+my_agent::ContextProjectionReceipt receipt_for_test(
+    const my_agent::ContextProjection& projection)
+{
+    return my_agent::ContextProjectionReceipt{
+        .provider = projection.provider,
+        .model = projection.model,
+        .fingerprint = projection.fingerprint,
+        .estimator_version = projection.estimator_version,
+        .policy_version = projection.policy_version,
+        .segments = projection.segments,
+        .realistic_input_tokens = projection.realistic_input_tokens,
+    };
+}
+
 struct QueuedRequestFixture {
     my_agent::Model model;
     my_agent::Request request;
@@ -40,30 +54,29 @@ QueuedRequestFixture queued_request_fixture()
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_name = "test-provider";
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, "test-provider", "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(400, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(400, 'a')),
     };
-    model.queued_messages.push_back(my_agent::QueuedMessage{
+    model.session.queued_messages.push_back(my_agent::QueuedMessage{
         .turn_id = my_agent::TurnId{2},
         .message_id = my_agent::MessageId{3},
         .text = std::string(400, 'q'),
     });
 
     my_agent::Request request{
-        .messages = model.thread.messages,
+        .messages = model.domain.thread.messages,
         .max_output_tokens = config.normal_output_budget(),
     };
     request.messages.push_back(message(
         my_agent::Role::User, 3, 2, std::string(400, 'q')));
     const my_agent::ContextProjection projection = my_agent::project_context(
-        model.provider_name,
-        model.provider_model,
+        model.domain.request_policy.provider_name(),
+        model.domain.request_policy.provider_model(),
         request,
-        model.projection_ledger,
+        model.session.projection_ledger,
         config.estimator_version,
         config.projection_policy_version,
         config.tool_replay_policy,
@@ -87,14 +100,12 @@ my_agent::Msg prepared_event(
     my_agent::PreparationId preparation_id)
 {
     return my_agent::Msg{my_agent::RequestPrepared{
-        .turn_id = my_agent::TurnId{2},
         .preparation_id = preparation_id,
-        .request = fixture.request,
-        .provider_name = "test-provider",
-        .provider_model = "test-model",
-        .request_fingerprint = fixture.projection.fingerprint,
-        .budget = fixture.budget,
-        .projection = fixture.projection,
+        .snapshot = my_agent::PreparedRequestSnapshot{
+            .request = fixture.request,
+            .budget = fixture.budget,
+            .receipt = receipt_for_test(fixture.projection),
+        },
     }};
 }
 
@@ -116,10 +127,9 @@ my_agent::Model manual_compaction_model()
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_name = "test-provider";
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, "test-provider", "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(400, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(400, 'a')),
     };
@@ -152,8 +162,8 @@ TEST(AgentLoopTest, SubmitFromIdleStartsOneQueuedStream)
     EXPECT_EQ(my_agent::TurnId{1}, command->ref.turn_id);
     EXPECT_EQ(my_agent::StreamId{1}, command->ref.stream_id);
     ASSERT_TRUE(std::holds_alternative<my_agent::Streaming>(step.model.phase));
-    EXPECT_EQ(2U, step.model.thread.messages.size());
-    EXPECT_EQ("hello", step.model.thread.messages.front().text);
+    EXPECT_EQ(2U, step.model.domain.thread.messages.size());
+    EXPECT_EQ("hello", step.model.domain.thread.messages.front().text);
 }
 
 TEST(AgentLoopTest, PolicyUpdateReissuesPreparationAndRejectsBothStaleResults)
@@ -340,8 +350,8 @@ TEST(AgentLoopTest, IdleCompactionRequestStartsOneManualCompaction)
     ASSERT_NE(nullptr, command);
     ASSERT_TRUE(std::holds_alternative<my_agent::Compacting>(
         started.model.phase));
-    EXPECT_TRUE(started.model.queued_messages.empty());
-    EXPECT_EQ(2U, started.model.thread.messages.size());
+    EXPECT_TRUE(started.model.session.queued_messages.empty());
+    EXPECT_EQ(2U, started.model.domain.thread.messages.size());
 }
 
 TEST(AgentLoopTest, ActiveCompactionKeepsItsCapturedPolicyAfterPolicyUpdate)
@@ -417,7 +427,7 @@ TEST(AgentLoopTest, ActiveCompactionKeepsItsCapturedPolicyAfterPolicyUpdate)
 TEST(AgentLoopTest, CompactionRequestIsIgnoredWhileBusyOrQueued)
 {
     my_agent::Model busy = manual_compaction_model();
-    busy.session.phase = my_agent::Streaming{};
+    busy.phase = my_agent::Streaming{};
     const my_agent::Step busy_step = my_agent::update(
         busy, my_agent::Msg{my_agent::RequestCompaction{}});
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(busy_step.cmd));
@@ -436,7 +446,7 @@ TEST(AgentLoopTest, CompactionRequestIsIgnoredWhileBusyOrQueued)
         queued_step.cmd));
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(
         queued_step.model.phase));
-    EXPECT_EQ(1U, queued_step.model.queued_messages.size());
+    EXPECT_EQ(1U, queued_step.model.session.queued_messages.size());
 }
 
 TEST(AgentLoopTest, ManualCompactionSuccessKeepsRawTranscriptAndAcceptsSummary)
@@ -463,10 +473,10 @@ TEST(AgentLoopTest, ManualCompactionSuccessKeepsRawTranscriptAndAcceptsSummary)
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(
         finished.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(finished.cmd));
-    ASSERT_TRUE(finished.model.accepted_compaction.has_value());
-    EXPECT_EQ(2U, finished.model.thread.messages.size());
-    EXPECT_EQ(std::string(400, 'u'), finished.model.thread.messages[0].text);
-    EXPECT_EQ(std::string(400, 'a'), finished.model.thread.messages[1].text);
+    ASSERT_TRUE(finished.model.domain.thread.accepted_compaction.has_value());
+    EXPECT_EQ(2U, finished.model.domain.thread.messages.size());
+    EXPECT_EQ(std::string(400, 'u'), finished.model.domain.thread.messages[0].text);
+    EXPECT_EQ(std::string(400, 'a'), finished.model.domain.thread.messages[1].text);
 }
 
 TEST(AgentLoopTest, ManualCompactionFailureAndCancelDoNotRetry)
@@ -489,7 +499,7 @@ TEST(AgentLoopTest, ManualCompactionFailureAndCancelDoNotRetry)
         }});
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(failed.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(failed.cmd));
-    ASSERT_TRUE(failed.model.last_failed_compaction_source.has_value());
+    ASSERT_TRUE(failed.model.session.last_failed_compaction.has_value());
 
     const my_agent::Step cancelled_start = start_manual();
     const auto* cancelled_command = std::get_if<my_agent::StartCompaction>(
@@ -503,7 +513,7 @@ TEST(AgentLoopTest, ManualCompactionFailureAndCancelDoNotRetry)
     const auto* cancel = std::get_if<my_agent::CancelOperation>(
         &cancelled.cmd);
     ASSERT_NE(nullptr, cancel);
-    EXPECT_EQ(my_agent::OperationKind::Compaction, cancel->operation.kind);
+    EXPECT_EQ(cancelled_command->compaction_id, std::get<my_agent::CompactionId>(cancel->operation));
 }
 
 TEST(AgentLoopTest, StaleManualCompactionEventsDoNotChangeTheActiveOperation)
@@ -527,7 +537,7 @@ TEST(AgentLoopTest, StaleManualCompactionEventsDoNotChangeTheActiveOperation)
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(stale.cmd));
     EXPECT_FALSE(std::get<my_agent::Compacting>(stale.model.phase)
                      .pending_summary.size());
-    EXPECT_FALSE(stale.model.accepted_compaction.has_value());
+    EXPECT_FALSE(stale.model.domain.thread.accepted_compaction.has_value());
 }
 
 TEST(AgentLoopTest, CompactionUsageWithMismatchedIdentityIsIgnored)
@@ -539,26 +549,11 @@ TEST(AgentLoopTest, CompactionUsageWithMismatchedIdentityIsIgnored)
         &started.cmd);
     ASSERT_NE(nullptr, command);
 
-    const my_agent::OperationRef wrong_value{
-        .owner = command->compaction_id,
-        .kind = my_agent::OperationKind::Compaction,
-        .value = command->compaction_id.value + 1,
-    };
-    const my_agent::OperationRef wrong_kind{
-        .owner = command->compaction_id,
-        .kind = my_agent::OperationKind::Stream,
-        .value = command->compaction_id.value,
-    };
-    const my_agent::OperationRef wrong_owner{
-        .owner = my_agent::CompactionId{command->compaction_id.value + 1},
-        .kind = my_agent::OperationKind::Compaction,
-        .value = command->compaction_id.value,
-    };
-
-    const std::array<my_agent::OperationRef, 3> mismatched_operations{
-        wrong_value,
-        wrong_kind,
-        wrong_owner,
+    const std::array<my_agent::OperationRef, 4> mismatched_operations{
+        my_agent::CompactionId{},
+        my_agent::CompactionId{command->compaction_id.value + 1},
+        my_agent::StreamRef{.turn_id = my_agent::TurnId{1}, .stream_id = my_agent::StreamId{command->compaction_id.value}},
+        my_agent::ToolCallRef{.assistant_message_id = my_agent::MessageId{1}, .tool_exec_id = my_agent::ToolExecId{command->compaction_id.value}},
     };
     for (const my_agent::OperationRef& operation :
          mismatched_operations) {
@@ -587,7 +582,7 @@ TEST(AgentLoopTest, CompactionUsageWithMismatchedIdentityIsIgnored)
 TEST(AgentLoopTest, ManualCompactionWithoutCompleteHistoryReportsTypedFailure)
 {
     my_agent::Model model = manual_compaction_model();
-    model.thread.messages = {
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, "incomplete turn"),
     };
 
@@ -597,7 +592,7 @@ TEST(AgentLoopTest, ManualCompactionWithoutCompleteHistoryReportsTypedFailure)
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(step.model.phase));
     EXPECT_EQ(
         my_agent::ContextBlockDetail::NoCompleteHistory,
-        step.model.last_failed_compaction_detail);
+        step.model.session.last_failed_compaction->detail);
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(step.cmd));
 }
 
@@ -608,9 +603,9 @@ TEST(AgentLoopTest, ManualCompactionWithAnOversizedSourceReportsTypedFailure)
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, {}, "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(4000, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(4000, 'a')),
     };
@@ -621,7 +616,7 @@ TEST(AgentLoopTest, ManualCompactionWithAnOversizedSourceReportsTypedFailure)
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(step.model.phase));
     EXPECT_EQ(
         my_agent::ContextBlockDetail::CompactionSourceTooLarge,
-        step.model.last_failed_compaction_detail);
+        step.model.session.last_failed_compaction->detail);
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(step.cmd));
 }
 
@@ -641,7 +636,7 @@ TEST(AgentLoopTest, StaleStreamDeltaDoesNotChangeTheActiveModel)
             .text = "ignored",
         }});
 
-    EXPECT_EQ(stale.model.thread.messages.back().text, "");
+    EXPECT_EQ(stale.model.domain.thread.messages.back().text, "");
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(stale.cmd));
 }
 
@@ -665,14 +660,14 @@ TEST(AgentLoopTest, FinishedStreamReturnsToIdleAndKeepsTranscript)
         }});
 
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(finished.model.phase));
-    EXPECT_EQ("world", finished.model.thread.messages.back().text);
+    EXPECT_EQ("world", finished.model.domain.thread.messages.back().text);
 }
 
 TEST(AgentLoopTest, FinishedIdleTurnDoesNotStartProjectionRefresh)
 {
     my_agent::Model model;
-    model.context_management_config = my_agent::ContextManagementConfig{};
-    model.thread.messages = {
+    model.domain.request_policy = my_agent::RequestPolicy{};
+    model.domain.thread.messages = {
         my_agent::Message{
             .role = my_agent::Role::User,
             .text = "hello",
@@ -705,30 +700,29 @@ TEST(AgentLoopTest, QueuedPreparedRequestStartsOneCompaction)
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_name = "test-provider";
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, "test-provider", "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(400, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(400, 'a')),
     };
-    model.queued_messages.push_back(my_agent::QueuedMessage{
+    model.session.queued_messages.push_back(my_agent::QueuedMessage{
         .turn_id = my_agent::TurnId{2},
         .message_id = my_agent::MessageId{3},
         .text = std::string(400, 'q'),
     });
 
     my_agent::Request request{
-        .messages = model.thread.messages,
+        .messages = model.domain.thread.messages,
         .max_output_tokens = config.normal_output_budget(),
     };
     request.messages.push_back(message(
         my_agent::Role::User, 3, 2, std::string(400, 'q')));
     const my_agent::ContextProjection projection = my_agent::project_context(
-        model.provider_name,
-        model.provider_model,
+        model.domain.request_policy.provider_name(),
+        model.domain.request_policy.provider_model(),
         request,
-        model.projection_ledger,
+        model.session.projection_ledger,
         config.estimator_version,
         config.projection_policy_version,
         config.tool_replay_policy,
@@ -745,14 +739,12 @@ TEST(AgentLoopTest, QueuedPreparedRequestStartsOneCompaction)
     const my_agent::Step prepared = my_agent::update(
         std::move(model),
         my_agent::Msg{my_agent::RequestPrepared{
-            .turn_id = my_agent::TurnId{2},
             .preparation_id = my_agent::PreparationId{1},
-            .request = request,
-            .provider_name = "test-provider",
-            .provider_model = "test-model",
-            .request_fingerprint = projection.fingerprint,
-            .budget = budget,
-            .projection = projection,
+            .snapshot = my_agent::PreparedRequestSnapshot{
+                .request = request,
+                .budget = budget,
+                .receipt = receipt_for_test(projection),
+            },
         }});
 
     const auto* command = std::get_if<my_agent::StartCompaction>(
@@ -771,10 +763,9 @@ TEST(AgentLoopTest, ContextLimitOnEmptyQueuedTurnBlocksWithoutRecovery)
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_name = "test-provider";
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, "test-provider", "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(400, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(400, 'a')),
         message(my_agent::Role::User, 3, 2, std::string(400, 'q')),
@@ -782,22 +773,30 @@ TEST(AgentLoopTest, ContextLimitOnEmptyQueuedTurnBlocksWithoutRecovery)
     };
     my_agent::Request request{
         .messages = {
-            model.thread.messages[0],
-            model.thread.messages[1],
-            model.thread.messages[2],
+            model.domain.thread.messages[0],
+            model.domain.thread.messages[1],
+            model.domain.thread.messages[2],
         },
         .max_output_tokens = config.normal_output_budget(),
     };
     const my_agent::ContextProjection projection = my_agent::project_context(
-        model.provider_name,
-        model.provider_model,
+        model.domain.request_policy.provider_name(),
+        model.domain.request_policy.provider_model(),
         request,
-        model.projection_ledger,
+        model.session.projection_ledger,
         config.estimator_version,
         config.projection_policy_version,
         config.tool_replay_policy,
         config.effective_limit());
-    model.phase = my_agent::Streaming{.ref = my_agent::StreamRef{.turn_id = my_agent::TurnId{2}, .stream_id = my_agent::StreamId{1}}, .target_message_id = my_agent::MessageId{4}, .projection_snapshot = projection};
+    model.phase = my_agent::Streaming{
+        .ref = my_agent::StreamRef{
+            .turn_id = my_agent::TurnId{2},
+            .stream_id = my_agent::StreamId{1},
+        },
+        .target_message_id = my_agent::MessageId{4},
+        .projection_receipt = receipt_for_test(projection),
+        .rollback_user_message = my_agent::MessageId{3},
+    };
 
     const my_agent::Step failed = my_agent::update(
         std::move(model),
@@ -816,17 +815,17 @@ TEST(AgentLoopTest, ContextLimitOnEmptyQueuedTurnBlocksWithoutRecovery)
     EXPECT_EQ(
         my_agent::ContextBlockDetail::RequestTooLarge,
         blocked.context_detail);
-    EXPECT_EQ(2U, failed.model.thread.messages.size());
-    ASSERT_EQ(1U, failed.model.queued_messages.size());
+    EXPECT_EQ(2U, failed.model.domain.thread.messages.size());
+    ASSERT_EQ(1U, failed.model.session.queued_messages.size());
     EXPECT_EQ(my_agent::MessageId{3},
-              failed.model.queued_messages.front().message_id);
+              failed.model.session.queued_messages.front().message_id);
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(failed.cmd));
 }
 
 TEST(AgentLoopTest, ContextLimitOnToolContinuationPreservesSideEffects)
 {
     my_agent::Model model;
-    model.thread.messages = {
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, "calculate"),
         my_agent::Message{
             .role = my_agent::Role::Assistant,
@@ -846,8 +845,8 @@ TEST(AgentLoopTest, ContextLimitOnToolContinuationPreservesSideEffects)
     };
     const my_agent::Request request{
         .messages = {
-            model.thread.messages[0],
-            model.thread.messages[1],
+            model.domain.thread.messages[0],
+            model.domain.thread.messages[1],
         },
     };
     model.phase = my_agent::Streaming{.ref = my_agent::StreamRef{.turn_id = my_agent::TurnId{1}, .stream_id = my_agent::StreamId{1}}, .target_message_id = my_agent::MessageId{3}, .projection_receipt = my_agent::ContextProjectionReceipt{
@@ -870,9 +869,9 @@ TEST(AgentLoopTest, ContextLimitOnToolContinuationPreservesSideEffects)
     EXPECT_EQ(
         my_agent::ContextBlockDetail::RequestTooLarge,
         std::get<my_agent::Blocked>(failed.model.phase).context_detail);
-    ASSERT_EQ(3U, failed.model.thread.messages.size());
-    ASSERT_EQ(1U, failed.model.thread.messages[1].tool_calls.size());
-    EXPECT_EQ("42", failed.model.thread.messages[1].tool_calls[0].output());
+    ASSERT_EQ(3U, failed.model.domain.thread.messages.size());
+    ASSERT_EQ(1U, failed.model.domain.thread.messages[1].tool_calls.size());
+    EXPECT_EQ("42", failed.model.domain.thread.messages[1].tool_calls[0].output());
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(failed.cmd));
 }
 
@@ -906,8 +905,8 @@ TEST(AgentLoopTest, ContextLimitAfterVisibleOutputKeepsTheCurrentTurn)
     EXPECT_EQ(
         my_agent::ContextBlockDetail::RequestTooLarge,
         std::get<my_agent::Blocked>(failed.model.phase).context_detail);
-    ASSERT_EQ(2U, failed.model.thread.messages.size());
-    EXPECT_EQ("partial answer", failed.model.thread.messages.back().text);
+    ASSERT_EQ(2U, failed.model.domain.thread.messages.size());
+    EXPECT_EQ("partial answer", failed.model.domain.thread.messages.back().text);
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(failed.cmd));
 }
 
@@ -918,28 +917,28 @@ TEST(AgentLoopTest, SourceTooLargeBlocksTheQueuedRequestWithTypedDetail)
     config.safety_margin = 16;
 
     my_agent::Model model;
-    model.context_management_config = config;
-    model.provider_model = "test-model";
-    model.thread.messages = {
+    model.domain.request_policy =
+        my_agent::RequestPolicy{config, {}, "test-model"};
+    model.domain.thread.messages = {
         message(my_agent::Role::User, 1, 1, std::string(4000, 'u')),
         message(my_agent::Role::Assistant, 2, 1, std::string(4000, 'a')),
     };
-    model.queued_messages.push_back(my_agent::QueuedMessage{
+    model.session.queued_messages.push_back(my_agent::QueuedMessage{
         .turn_id = my_agent::TurnId{2},
         .message_id = my_agent::MessageId{3},
         .text = "next",
     });
     my_agent::Request request{
-        .messages = model.thread.messages,
+        .messages = model.domain.thread.messages,
         .max_output_tokens = config.normal_output_budget(),
     };
     request.messages.push_back(message(
         my_agent::Role::User, 3, 2, "next"));
     const my_agent::ContextProjection projection = my_agent::project_context(
         {},
-        model.provider_model,
+        model.domain.request_policy.provider_model(),
         request,
-        model.projection_ledger,
+        model.session.projection_ledger,
         config.estimator_version,
         config.projection_policy_version,
         config.tool_replay_policy,
@@ -955,13 +954,12 @@ TEST(AgentLoopTest, SourceTooLargeBlocksTheQueuedRequestWithTypedDetail)
     const my_agent::Step blocked = my_agent::update(
         std::move(model),
         my_agent::Msg{my_agent::RequestPrepared{
-            .turn_id = my_agent::TurnId{2},
             .preparation_id = my_agent::PreparationId{1},
-            .request = request,
-            .provider_model = "test-model",
-            .request_fingerprint = projection.fingerprint,
-            .budget = budget,
-            .projection = projection,
+            .snapshot = my_agent::PreparedRequestSnapshot{
+                .request = request,
+                .budget = budget,
+                .receipt = receipt_for_test(projection),
+            },
         }});
 
     ASSERT_TRUE(std::holds_alternative<my_agent::Blocked>(
@@ -969,7 +967,7 @@ TEST(AgentLoopTest, SourceTooLargeBlocksTheQueuedRequestWithTypedDetail)
     EXPECT_EQ(
         my_agent::ContextBlockDetail::CompactionSourceTooLarge,
         std::get<my_agent::Blocked>(blocked.model.phase).context_detail);
-    ASSERT_EQ(1U, blocked.model.queued_messages.size());
+    ASSERT_EQ(1U, blocked.model.session.queued_messages.size());
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(blocked.cmd));
 }
 
@@ -997,11 +995,13 @@ TEST(AgentLoopTest, SuccessfulCompactionRepreparesTheSameQueueHead)
     const auto* prepare = std::get_if<my_agent::PrepareRequest>(
         &finished.cmd);
     ASSERT_NE(nullptr, prepare);
-    EXPECT_EQ(my_agent::TurnId{2}, prepare->turn_id);
-    EXPECT_EQ(1U, finished.model.queued_messages.size());
-    ASSERT_TRUE(finished.model.accepted_compaction.has_value());
-    EXPECT_EQ(2U, finished.model.thread.messages.size());
-    for (const my_agent::Message& item : finished.model.thread.messages) {
+    const auto& preparing = std::get<my_agent::PreparingRequest>(finished.model.phase);
+    EXPECT_EQ(my_agent::TurnId{2},
+        std::get<my_agent::QueuedTurnRequest>(preparing.intent).turn_id);
+    EXPECT_EQ(1U, finished.model.session.queued_messages.size());
+    ASSERT_TRUE(finished.model.domain.thread.accepted_compaction.has_value());
+    EXPECT_EQ(2U, finished.model.domain.thread.messages.size());
+    for (const my_agent::Message& item : finished.model.domain.thread.messages) {
         EXPECT_EQ(std::string::npos, item.text.find("Earlier conversation"));
     }
 }
@@ -1023,7 +1023,7 @@ TEST(AgentLoopTest, FailedCompactionRepreparesThenStreamsWithoutRetry)
         }});
     const auto* prepare = std::get_if<my_agent::PrepareRequest>(&failed.cmd);
     ASSERT_NE(nullptr, prepare);
-    ASSERT_TRUE(failed.model.last_failed_compaction_source.has_value());
+    ASSERT_TRUE(failed.model.session.last_failed_compaction.has_value());
 
     const QueuedRequestFixture retry_fixture{
         .model = failed.model,
@@ -1055,7 +1055,7 @@ TEST(AgentLoopTest, CancelledCompactionRepreparesThenStreamsWithoutRetry)
     const auto* prepare = std::get_if<my_agent::PrepareRequest>(
         &cancelled.cmd);
     ASSERT_NE(nullptr, prepare);
-    ASSERT_TRUE(cancelled.model.last_failed_compaction_source.has_value());
+    ASSERT_TRUE(cancelled.model.session.last_failed_compaction.has_value());
 
     const QueuedRequestFixture retry_fixture{
         .model = cancelled.model,
@@ -1095,26 +1095,26 @@ TEST(AgentLoopTest, NewCompletedTurnAllowsCompactionAfterAFailedSource)
     const my_agent::TurnId turn_id = std::get<my_agent::QueuedTurnRequest>(preparing->intent).turn_id;
     const my_agent::PreparationId preparation_id = preparing->preparation_id;
 
-    failed.model.thread.messages.push_back(
+    failed.model.domain.thread.messages.push_back(
         message(my_agent::Role::User, 5, 3, "new completed question"));
-    failed.model.thread.messages.push_back(
+    failed.model.domain.thread.messages.push_back(
         message(my_agent::Role::Assistant, 6, 3, "new completed answer"));
     const my_agent::ContextManagementConfig& config =
-        *failed.model.context_management_config;
+        failed.model.domain.request_policy.config();
     my_agent::Request request{
-        .messages = failed.model.thread.messages,
+        .messages = failed.model.domain.thread.messages,
         .max_output_tokens = config.normal_output_budget(),
     };
     request.messages.push_back(message(
         my_agent::Role::User,
-        failed.model.queued_messages.front().message_id.value,
-        failed.model.queued_messages.front().turn_id.value,
-        failed.model.queued_messages.front().text));
+        failed.model.session.queued_messages.front().message_id.value,
+        failed.model.session.queued_messages.front().turn_id.value,
+        failed.model.session.queued_messages.front().text));
     const my_agent::ContextProjection projection = my_agent::project_context(
-        failed.model.provider_name,
-        failed.model.provider_model,
+        failed.model.domain.request_policy.provider_name(),
+        failed.model.domain.request_policy.provider_model(),
         request,
-        failed.model.projection_ledger,
+        failed.model.session.projection_ledger,
         config.estimator_version,
         config.projection_policy_version,
         config.tool_replay_policy,
@@ -1129,14 +1129,12 @@ TEST(AgentLoopTest, NewCompletedTurnAllowsCompactionAfterAFailedSource)
     const my_agent::Step reprepared = my_agent::update(
         std::move(failed.model),
         my_agent::Msg{my_agent::RequestPrepared{
-            .turn_id = turn_id,
             .preparation_id = preparation_id,
-            .request = request,
-            .provider_name = "test-provider",
-            .provider_model = "test-model",
-            .request_fingerprint = projection.fingerprint,
-            .budget = budget,
-            .projection = projection,
+            .snapshot = my_agent::PreparedRequestSnapshot{
+                .request = request,
+                .budget = budget,
+                .receipt = receipt_for_test(projection),
+            },
         }});
 
     EXPECT_TRUE(std::holds_alternative<my_agent::StartCompaction>(

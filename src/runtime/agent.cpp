@@ -22,36 +22,6 @@
 namespace my_agent {
 namespace {
 
-TurnId allocate_turn(Model& model)
-{
-    return TurnId{model.session.ids.next_turn++};
-}
-
-MessageId allocate_message(Model& model)
-{
-    return MessageId{model.session.ids.next_message++};
-}
-
-StreamId allocate_stream(Model& model)
-{
-    return StreamId{model.session.ids.next_stream++};
-}
-
-PreparationId allocate_preparation(Model& model)
-{
-    return PreparationId{model.session.ids.next_preparation++};
-}
-
-CompactionId allocate_compaction(Model& model)
-{
-    return CompactionId{model.session.ids.next_compaction++};
-}
-
-ToolExecId allocate_tool_exec(Model& model)
-{
-    return ToolExecId{model.session.ids.next_tool_exec++};
-}
-
 Message* message_for(Model& model, MessageId id)
 {
     if (id.value == 0) {
@@ -96,57 +66,60 @@ ContextBlockDetail detail_for_validation_failure(
         : ContextBlockDetail::CompactionFailed;
 }
 
-PrepareRequest start_request_preparation(
-    Model& model,
-    TurnId turn_id,
-    RequestPurpose purpose,
-    Request request,
-    MessageId queued_message_id = {},
-    MessageId assistant_message_id = {})
+TurnId intent_turn(const RequestIntent& intent)
 {
-    const PreparationId preparation_id = allocate_preparation(model);
-    model.phase = PreparingRequest{
-        .turn_id = turn_id,
-        .preparation_id = preparation_id,
-        .purpose = purpose,
-        .queued_message_id = queued_message_id,
-        .assistant_message_id = assistant_message_id,
-    };
-    return PrepareRequest{
-        .preparation_id = preparation_id,
-        .request = std::move(request),
-        .provider_name = model.domain.provider_name,
-        .provider_model = model.domain.provider_model,
-        .policy = model.domain.context_management_config,
-        .ledger = model.session.projection_ledger,
-    };
+    return std::visit([](const auto& request) { return request.turn_id; }, intent);
 }
 
-std::optional<Request> request_for_preparation(
-    const Model& model,
-    const PreparingRequest& preparing)
+std::optional<MessageId> intent_assistant(const RequestIntent& intent)
+{
+    return std::visit([](const auto& request) -> std::optional<MessageId> {
+        using Intent = std::decay_t<decltype(request)>;
+        if constexpr (std::is_same_v<Intent, ToolContinuationRequest>) {
+            return request.previous_assistant_id;
+        } else if constexpr (std::is_same_v<Intent, RetryRequest>) {
+            return request.target_assistant_id;
+        } else {
+            return std::nullopt;
+        }
+    }, intent);
+}
+
+std::optional<Request> request_for_intent(const Model& model, const RequestIntent& intent)
 {
     Request request = canonical_request(model.domain.thread);
-    if (preparing.purpose != RequestPurpose::QueuedTurn) {
-        return request;
-    }
-    const auto item = std::find_if(
-        model.session.queued_messages.begin(),
-        model.session.queued_messages.end(),
-        [&preparing](const QueuedMessage& queued) {
-            return queued.turn_id == preparing.turn_id
-                && queued.message_id == preparing.queued_message_id;
+    if (const auto* queued = std::get_if<QueuedTurnRequest>(&intent)) {
+        if (model.session.queued_messages.empty()) {
+            return std::nullopt;
+        }
+        const auto& head = model.session.queued_messages.front();
+        if (head.turn_id != queued->turn_id || head.message_id != queued->queued_message_id) {
+            return std::nullopt;
+        }
+        request.messages.push_back(Message{
+            .role = Role::User, .text = head.text,
+            .id = head.message_id, .turn_id = head.turn_id,
         });
-    if (item == model.session.queued_messages.end()) {
-        return std::nullopt;
     }
-    request.messages.push_back(Message{
-        .role = Role::User,
-        .text = item->text,
-        .id = item->message_id,
-        .turn_id = item->turn_id,
-    });
     return request;
+}
+
+Cmd start_request_preparation(Model& model, RequestIntent intent)
+{
+    auto request = request_for_intent(model, intent);
+    if (!request) {
+        model.phase = Idle{};
+        return drive(model);
+    }
+    const PreparationId preparation_id{
+        model.session.ids.next_preparation++};
+    model.phase = PreparingRequest{.preparation_id = preparation_id, .intent = std::move(intent)};
+    return PrepareRequest{
+        .preparation_id = preparation_id,
+        .request = std::move(*request),
+        .policy = model.domain.request_policy,
+        .ledger = model.session.projection_ledger,
+    };
 }
 
 Cmd start_compaction(
@@ -154,7 +127,7 @@ Cmd start_compaction(
     CompactionPlan plan)
 {
     const RequestFingerprint request_fingerprint = fingerprint_request(
-        plan.provider_model,
+        plan.policy.provider_model(),
         plan.compaction_request);
     model.phase = Compacting{
         .plan = plan,
@@ -186,20 +159,10 @@ Cmd drive(Model& model)
         return NoCommand{};
     }
 
-    const QueuedMessage& item = model.session.queued_messages.front();
-    Request request = canonical_request(model.domain.thread);
-    request.messages.push_back(Message{
-        .role = Role::User,
-        .text = item.text,
-        .id = item.message_id,
-        .turn_id = item.turn_id,
+    const auto& item = model.session.queued_messages.front();
+    return start_request_preparation(model, QueuedTurnRequest{
+        .turn_id = item.turn_id, .queued_message_id = item.message_id,
     });
-    return start_request_preparation(
-        model,
-        item.turn_id,
-        RequestPurpose::QueuedTurn,
-        std::move(request),
-        item.message_id);
 }
 
 Cmd finish_turn(Model& model)
@@ -226,6 +189,18 @@ std::optional<MessageId> active_assistant(const Model& model)
         model.phase);
 }
 
+Cmd start_continuation(Model& model, TurnId turn_id)
+{
+    for (auto it = model.domain.thread.messages.rbegin(); it != model.domain.thread.messages.rend(); ++it) {
+        if (it->id.value != 0 && it->turn_id == turn_id && it->role == Role::Assistant) {
+            return start_request_preparation(model, ToolContinuationRequest{
+                .turn_id = turn_id, .previous_assistant_id = it->id,
+            });
+        }
+    }
+    return finish_turn(model);
+}
+
 void block_context_limit(
     Model& model,
     std::string message,
@@ -248,7 +223,7 @@ bool rollback_empty_queued_turn(
     Model& model,
     const Streaming& active)
 {
-    if (active.purpose != RequestPurpose::QueuedTurn) {
+    if (!active.rollback_user_message) {
         return false;
     }
     Message* assistant = message_for(model, active.target_message_id);
@@ -272,6 +247,7 @@ bool rollback_empty_queued_turn(
     }
     auto user_position = std::prev(assistant_position);
     if (user_position->role != Role::User
+        || user_position->id != *active.rollback_user_message
         || user_position->turn_id != active.ref.turn_id) {
         return false;
     }
@@ -339,17 +315,13 @@ Cmd kick_pending_tools(Model& model)
     if (assistant->tool_calls.empty()) {
         return finish_turn(model);
     }
-    return start_request_preparation(model,
-        ToolContinuationRequest{
-            .turn_id = assistant->turn_id,
-            .previous_assistant_id = assistant->id,
-        });
+    return start_continuation(model, assistant->turn_id);
 }
 
 Cmd apply(Model& model, const Submit& submit)
 {
-    const TurnId turn_id = allocate_turn(model);
-    const MessageId message_id = allocate_message(model);
+    const TurnId turn_id{model.session.ids.next_turn++};
+    const MessageId message_id{model.session.ids.next_message++};
     model.session.queued_messages.push_back(QueuedMessage{
         .turn_id = turn_id,
         .message_id = message_id,
@@ -368,11 +340,10 @@ Cmd apply(Model& model, const RequestCompaction&)
 
     Request next_request = canonical_request(model.domain.thread);
     const auto planned = make_compaction_plan(
-        allocate_compaction(model),
+        CompactionId{model.session.ids.next_compaction++},
         model.domain.thread,
         next_request,
-        model.domain.provider_model,
-        model.domain.context_management_config);
+        model.domain.request_policy);
     if (!planned) {
         const ContextBlockDetail detail = detail_for_plan_failure(
             planned.error().kind);
@@ -422,29 +393,44 @@ Cmd apply(Model& model, const ResolvedStreamToolCall& event)
         }
     }
 
-    const ToolExecId tool_exec_id = allocate_tool_exec(model);
+    const ToolExecId tool_exec_id{model.session.ids.next_tool_exec++};
     ToolCall call{
         .id = event.id,
         .name = event.name,
         .args = event.args,
-        .status = std::visit(
-            [](const auto& resolution) -> ToolCall::Status {
-                using Resolution = std::decay_t<decltype(resolution)>;
-                if constexpr (std::is_same_v<Resolution, tool::ToolBinding>) {
-                    return ToolCall::Pending{.binding = resolution};
-                } else {
-                    return ToolCall::Failed{.output = resolution.message};
-                }
-            },
-            event.resolution),
+        .status = ToolCall::Pending{},
         .tool_exec_id = tool_exec_id,
     };
+    bool unresolved = false;
+    std::visit(
+        [&call, &unresolved](const auto& resolution) {
+            using Resolution = std::decay_t<decltype(resolution)>;
+            if constexpr (std::is_same_v<Resolution, tool::ToolBinding>) {
+                call.status = ToolCall::Pending{.binding = resolution};
+            } else if constexpr (
+                std::is_same_v<Resolution, tool::ToolResolutionError>) {
+                call.status = ToolCall::Failed{.output = resolution.message};
+            } else {
+                unresolved = true;
+                call.status = ToolCall::Failed{
+                    .output = "tool resolution boundary produced no result: "
+                        + call.name,
+                };
+            }
+        },
+        event.resolution);
     assistant->tool_calls.push_back(std::move(call));
 
     const std::size_t argument_bytes = event.args.dump().size();
     if (argument_bytes > 0){
         model.session.stream_telemetry.output_bytes += argument_bytes;
         ++model.session.stream_telemetry.generation;
+    }
+    if (unresolved) {
+        model.phase = Blocked{
+            .reason = BlockReason::InvalidConfiguration,
+            .message = "tool resolution boundary produced no result: " + event.name,
+        };
     }
     return NoCommand{};
 }
@@ -467,12 +453,12 @@ Cmd apply(Model& model, const RequestUsage& event)
 {
     if (auto* compacting = std::get_if<Compacting>(&model.phase);
         compacting != nullptr) {
-        if (!is_valid(compacting->plan.compaction_id)
+        if (compacting->plan.compaction_id.value == 0
             || compacting->usage_accepted
             || event.operation != OperationRef{compacting->plan.compaction_id}
             || event.request_fingerprint
                 != fingerprint_request(
-                    compacting->plan.provider_model,
+                    compacting->plan.policy.provider_model(),
                     compacting->plan.compaction_request)) {
             return NoCommand{};
         }
@@ -487,7 +473,7 @@ Cmd apply(Model& model, const RequestUsage& event)
         || !is_valid(active->ref)
         || active->usage_accepted
         || event.operation != OperationRef{active->ref}
-        || event.request_fingerprint != active->request_fingerprint) {
+        || event.request_fingerprint != active->projection_receipt.fingerprint) {
         return NoCommand{};
     }
 
@@ -514,18 +500,61 @@ Cmd apply(Model& model, const RequestPreparationFailed& event)
     }
 
     const PreparingRequest active = *preparing;
-    if (active.purpose == RequestPurpose::QueuedTurn) {
+    if (std::holds_alternative<QueuedTurnRequest>(active.intent)) {
         model.phase = Blocked{
             .reason = BlockReason::ExplicitResumeRequired,
             .message = event.message,
         };
         return NoCommand{};
     }
-    if (Message* assistant = message_for(model, active.assistant_message_id)) {
-        assistant->error = event.message;
+    if (const auto id = intent_assistant(active.intent)) {
+        if (auto* assistant = message_for(model, *id)) {
+            assistant->error = event.message;
+        }
     }
     model.phase = Idle{};
     return drive(model);
+}
+
+Cmd accept_prepared_request(Model& model, const PreparingRequest& active,
+                            const PreparedRequestSnapshot& snapshot)
+{
+    const TurnId turn_id = intent_turn(active.intent);
+    std::optional<MessageId> rollback_user_message;
+    if (const auto* queued = std::get_if<QueuedTurnRequest>(&active.intent)) {
+        auto item = std::move(model.session.queued_messages.front());
+        model.session.queued_messages.pop_front();
+        model.domain.thread.messages.push_back(Message{
+            .role = Role::User, .text = std::move(item.text),
+            .id = item.message_id, .turn_id = item.turn_id,
+        });
+        model.session.usage.begin_turn(item.turn_id);
+        rollback_user_message = queued->queued_message_id;
+    }
+    MessageId assistant_id;
+    if (const auto* retry = std::get_if<RetryRequest>(&active.intent)) {
+        assistant_id = retry->target_assistant_id;
+    } else {
+        assistant_id = MessageId{model.session.ids.next_message++};
+        model.domain.thread.messages.push_back(Message{
+            .role = Role::Assistant, .text = {}, .id = assistant_id, .turn_id = turn_id,
+        });
+    }
+    const StreamRef ref{
+        .turn_id = turn_id,
+        .stream_id = StreamId{model.session.ids.next_stream++},
+    };
+    model.phase = Streaming{
+        .ref = ref, .target_message_id = assistant_id,
+        .projection_receipt = snapshot.receipt,
+        .rollback_user_message = rollback_user_message,
+    };
+    model.session.usage.mark_context_pending();
+    model.session.stream_telemetry = {};
+    return StartStream{
+        .ref = ref,
+        .request = snapshot.request, .request_fingerprint = snapshot.receipt.fingerprint,
+    };
 }
 
 Cmd apply(Model& model, const RequestPrepared& event)
@@ -538,17 +567,18 @@ Cmd apply(Model& model, const RequestPrepared& event)
     }
 
     const PreparingRequest active = *preparing;
-    const ContextProjection& projection = event.snapshot.projection;
+    if (!request_for_intent(model, active.intent)) {
+        return NoCommand{};
+    }
     const ContextBudgetAssessment& budget = event.snapshot.budget;
-    if (active.purpose == RequestPurpose::QueuedTurn
+    if (std::holds_alternative<QueuedTurnRequest>(active.intent)
         && (budget.triggered || !budget.admitted)) {
         const auto planned = make_compaction_plan(
-            allocate_compaction(model),
+            CompactionId{model.session.ids.next_compaction++},
             model.domain.thread,
-            projection.request,
-            budget,
-            model.domain.provider_model,
-            model.domain.context_management_config);
+            event.snapshot.request,
+            model.domain.request_policy,
+            budget);
         if (planned) {
             const bool same_failed_source =
                 model.session.last_failed_compaction
@@ -590,9 +620,8 @@ Cmd apply(Model& model, const RequestPrepared& event)
     }
 
     if (!budget.admitted) {
-        if (active.purpose != RequestPurpose::QueuedTurn) {
-            if (Message* assistant = message_for(
-                    model, active.assistant_message_id)) {
+        if (const auto id = intent_assistant(active.intent)) {
+            if (auto* assistant = message_for(model, *id)) {
                 assistant->error = "context limit exceeded before request";
             }
         }
@@ -605,68 +634,14 @@ Cmd apply(Model& model, const RequestPrepared& event)
         return NoCommand{};
     }
 
-    MessageId assistant_message_id{};
-    if (active.purpose == RequestPurpose::QueuedTurn) {
-        if (model.session.queued_messages.empty()
-            || model.session.queued_messages.front().turn_id != active.turn_id
-            || model.session.queued_messages.front().message_id
-                != active.queued_message_id) {
-            return NoCommand{};
-        }
-        QueuedMessage item = std::move(model.session.queued_messages.front());
-        model.session.queued_messages.pop_front();
-        model.domain.thread.messages.push_back(Message{
-            .role = Role::User,
-            .text = std::move(item.text),
-            .id = item.message_id,
-            .turn_id = item.turn_id,
-        });
-        model.session.usage.begin_turn(item.turn_id);
-    } else if (active.purpose == RequestPurpose::ToolContinuation) {
-        assistant_message_id = allocate_message(model);
-        model.domain.thread.messages.push_back(Message{
-            .role = Role::Assistant,
-            .text = {},
-            .id = assistant_message_id,
-            .turn_id = active.turn_id,
-        });
-    } else {
-        assistant_message_id = active.assistant_message_id;
-    }
-
-    if (active.purpose == RequestPurpose::QueuedTurn) {
-        assistant_message_id = allocate_message(model);
-        model.domain.thread.messages.push_back(Message{
-            .role = Role::Assistant,
-            .text = {},
-            .id = assistant_message_id,
-            .turn_id = active.turn_id,
-        });
-    }
-
-    const StreamId stream_id = allocate_stream(model);
-    model.phase = Streaming{
-        .ref = StreamRef{.turn_id = active.turn_id, .stream_id = stream_id},
-        .target_message_id = assistant_message_id,
-        .request_fingerprint = projection.fingerprint,
-        .projection_receipt = projection_receipt(projection),
-        .purpose = active.purpose,
-    };
-    model.session.usage.mark_context_pending();
-    model.session.stream_telemetry = {};
-    return StartStream{
-        .ref = StreamRef{.turn_id = active.turn_id, .stream_id = stream_id},
-        .target_message_id = assistant_message_id,
-        .request = projection.request,
-        .request_fingerprint = projection.fingerprint,
-    };
+    return accept_prepared_request(model, active, event.snapshot);
 }
 
 Cmd apply(Model& model, const CompactionDelta& event)
 {
     auto* active = std::get_if<Compacting>(&model.phase);
     if (active == nullptr
-        || !is_valid(event.compaction_id)
+        || event.compaction_id.value == 0
         || active->plan.compaction_id != event.compaction_id) {
         return NoCommand{};
     }
@@ -678,7 +653,7 @@ Cmd apply(Model& model, const CompactionFinished& event)
 {
     auto* active = std::get_if<Compacting>(&model.phase);
     if (active == nullptr
-        || !is_valid(event.compaction_id)
+        || event.compaction_id.value == 0
         || active->plan.compaction_id != event.compaction_id) {
         return NoCommand{};
     }
@@ -703,7 +678,7 @@ Cmd apply(Model& model, const CompactionError& event)
 {
     const auto* active = std::get_if<Compacting>(&model.phase);
     if (active == nullptr
-        || !is_valid(event.compaction_id)
+        || event.compaction_id.value == 0
         || active->plan.compaction_id != event.compaction_id) {
         return NoCommand{};
     }
@@ -747,16 +722,9 @@ Cmd apply(Model& model, const StreamError& error)
     }
 
     if (error.disposition == FailureDisposition::RetryCurrent) {
-        const TurnId turn_id = active->ref.turn_id;
-        const MessageId target_message_id = active->target_message_id;
-        Request request = canonical_request(model.domain.thread);
-        return start_request_preparation(
-            model,
-            turn_id,
-            RequestPurpose::RetryCurrent,
-            std::move(request),
-            {},
-            target_message_id);
+        return start_request_preparation(model, RetryRequest{
+            .turn_id = active->ref.turn_id, .target_assistant_id = active->target_message_id,
+        });
     }
 
     assistant->error = error.message;
@@ -808,28 +776,11 @@ Cmd apply(Model& model, const SetProfile& event)
 
 Cmd apply(Model& model, const SetRequestPolicy& event)
 {
-    event.policy.validate();
-    model.domain.context_management_config = event.policy;
-    model.domain.provider_name = event.provider_name;
-    model.domain.provider_model = event.provider_model;
-
-    const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
-    if (preparing == nullptr) {
-        return NoCommand{};
+    model.domain.request_policy = event.policy;
+    if (const auto* preparing = std::get_if<PreparingRequest>(&model.phase)) {
+        return start_request_preparation(model, preparing->intent);
     }
-    const PreparingRequest active = *preparing;
-    std::optional<Request> request = request_for_preparation(model, active);
-    if (!request) {
-        model.phase = Idle{};
-        return drive(model);
-    }
-    return start_request_preparation(
-        model,
-        active.turn_id,
-        active.purpose,
-        std::move(*request),
-        active.queued_message_id,
-        active.assistant_message_id);
+    return NoCommand{};
 }
 
 Cmd apply(Model& model, const PermissionApprove& event)
@@ -882,7 +833,7 @@ Cmd apply(Model& model, const PermissionReject& event)
     return kick_pending_tools(model);
 }
 
-Cmd cancel_active(Model& model)
+Cmd apply(Model& model, const CancelActive&)
 {
     std::optional<OperationRef> operation;
     MessageId assistant_id{};
@@ -952,11 +903,6 @@ Cmd cancel_active(Model& model)
     return NoCommand{};
 }
 
-Cmd apply(Model& model, const CancelActive&)
-{
-    return cancel_active(model);
-}
-
 Cmd apply(Model& model, const ResumeQueue&)
 {
     if (std::holds_alternative<Blocked>(model.phase)) {
@@ -978,8 +924,8 @@ Cmd apply(Model& model, const ClearQueue&)
     // event stale when the owner thread next drains the inbox.
     if (const auto* preparing = std::get_if<PreparingRequest>(&model.phase);
         preparing != nullptr
-        && (preparing->purpose == RequestPurpose::QueuedTurn
-            || preparing->purpose == RequestPurpose::RetryCurrent)) {
+        && (std::holds_alternative<QueuedTurnRequest>(preparing->intent)
+            || std::holds_alternative<RetryRequest>(preparing->intent))) {
         model.phase = Idle{};
         return NoCommand{};
     }
@@ -1002,13 +948,6 @@ Cmd apply(Model& model, const ClearQueue&)
 }
 
 }  // namespace
-
-Request canonical_request(const Thread& thread)
-{
-    return project_request_with_compaction(Request{
-        .messages = thread.messages,
-    }, thread);
-}
 
 Step update(Model model, Msg msg)
 {

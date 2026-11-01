@@ -1,7 +1,7 @@
 #pragma once
 
-#include "my_agent/tool/tool.hpp"
+#include "my_agent/tool/tool_runtime.hpp"
 namespace my_agent::tool::detail {
     [[nodiscard]]
-    ToolDef make_calculator_tool();
+    RegisteredTool make_calculator_tool();
 }

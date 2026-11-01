@@ -29,7 +29,9 @@ namespace fs = std::filesystem;
 
 } // namespace
 
-ReadRoots::ReadRoots(const fs::path& workspace_root)
+ReadRoots::ReadRoots(
+    const fs::path& workspace_root,
+    bool allow_temporary_root)
 {
     std::error_code error;
     workspace_root_ = fs::canonical(workspace_root, error);
@@ -39,7 +41,9 @@ ReadRoots::ReadRoots(const fs::path& workspace_root)
             "readable workspace root must be an existing directory: "
             + workspace_root.string()};
     }
-    auto _ = add(fs::path{"/tmp"});
+    if (allow_temporary_root) {
+        auto _ = add(fs::path{"/tmp"});
+    }
 }
 
 const fs::path& ReadRoots::workspace_root() const noexcept { return workspace_root_; }

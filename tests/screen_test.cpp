@@ -1,4 +1,5 @@
 #include "my_agent/ui/screen.hpp"
+#include "my_agent/ui/maya_animation.hpp"
 
 #include <maya/core/anim_clock.hpp>
 #include <maya/core/motion.hpp>
@@ -204,7 +205,7 @@ void count_delayed_animation_request(void* context, std::int64_t) noexcept
 TEST(ScreenTest, ActivePhasesRequestBreathingButIdleDoesNot)
 {
     int requests = 0;
-    maya::anim::AnimationHostScope host{
+    my_agent::ui::MayaAnimationHostScope host{
         &requests,
         &count_animation_request,
         &count_delayed_animation_request,
@@ -285,7 +286,8 @@ TEST(ScreenTest, ProjectsCoreUsageFactsIntoTheRenderedStatusBar)
 
     maya::FrameBuffer framebuffer{160, 3};
     const std::string& bytes = framebuffer.render(
-        maya::StatusBar{screen.dock.status}.build(), maya::theme::dark);
+        my_agent::ui::status_bar_element(screen.dock.status),
+        maya::theme::dark);
 
     EXPECT_NE(std::string::npos, bytes.find("req in 128 out 36")) << bytes;
     EXPECT_NE(std::string::npos, bytes.find("turn in 180 out 42")) << bytes;
@@ -325,7 +327,8 @@ TEST(ScreenTest, HidesRequestAndTurnUsageBeforeCoreMetadataOnNarrowWidth)
 
     maya::FrameBuffer framebuffer{90, 3};
     const std::string& bytes = framebuffer.render(
-        maya::StatusBar{screen.dock.status}.build(), maya::theme::dark);
+        my_agent::ui::status_bar_element(screen.dock.status),
+        maya::theme::dark);
 
     EXPECT_EQ(std::string::npos, bytes.find("req in")) << bytes;
     EXPECT_EQ(std::string::npos, bytes.find("turn in")) << bytes;
@@ -367,7 +370,8 @@ TEST(ScreenTest, HidesTurnUsageBeforeRequestUsageAtMediumWidth)
 
     maya::FrameBuffer framebuffer{125, 3};
     const std::string& bytes = framebuffer.render(
-        maya::StatusBar{screen.dock.status}.build(), maya::theme::dark);
+        my_agent::ui::status_bar_element(screen.dock.status),
+        maya::theme::dark);
 
     EXPECT_NE(std::string::npos, bytes.find("req in")) << bytes;
     EXPECT_EQ(std::string::npos, bytes.find("turn in")) << bytes;
@@ -618,7 +622,8 @@ TEST(ScreenTest, RendersObservedContextQualityAlongsideTheMayaGauge)
 
     maya::FrameBuffer framebuffer{160, 3};
     const std::string& bytes = framebuffer.render(
-        maya::StatusBar{screen.dock.status}.build(), maya::theme::dark);
+        my_agent::ui::status_bar_element(screen.dock.status),
+        maya::theme::dark);
 
     EXPECT_NE(std::string::npos, bytes.find("ctx last")) << bytes;
 }

@@ -32,19 +32,21 @@
 
 要求：C++26 工具链、CMake ≥ 4.4、OpenSSL，以及本地跑着的 [Ollama](https://ollama.com)。
 
-> **maya 检出不在本仓库里。** 当前分支需要一份本地
-> [maya](https://github.com/1ay1/maya) 工作副本，且包含尚未进入上游的
-> `Composer::CaretMode::SolidCell` 扩展 —— 放在 `./maya`，或用
-> `FETCHCONTENT_SOURCE_DIR_MAYA` 指向它。缺了它 CMake 会按设计直接报错，
-> 而不是悄悄退回某个旧的上游 pin。
+[maya](https://github.com/1ay1/maya) 渲染依赖以子模块形式固定，CMake
+优先使用这份本地检出。子模块未初始化时，CMake 仍可通过
+FetchContent 获取同一个固定提交。
 
 ```bash
-git clone git@github.com:TCWW0/Agent.git my_agent && cd my_agent
-# 把你的 maya 检出放到 ./maya（见上面的说明）
+git clone --recurse-submodules git@github.com:TCWW0/Agent.git my_agent && cd my_agent
 cmake -B build && cmake --build build -j
 ollama pull qwen3.5:latest        # 或者任何你已有的模型
 ./build/my_agent_repl
 ```
+
+现有检出可执行 `git submodule update --init --recursive` 初始化依赖。
+CMake 生成的 `build/compile_commands.json` 同时是仓库 `.clangd` 使用的
+编译数据库。仓库内的 VS Code 工作区配置会选择 `clangd-22`，以
+正确解析 GCC 15 的 C++26 标准库头文件。
 
 全部配置走环境变量：
 
@@ -156,17 +158,19 @@ ollama pull nomic-embed-text && ollama serve # 可选：解锁稠密那半边
   `runtime/agent.cpp` 的 `(Model, Msg) → Step{Model, Cmd}` reducer 上。流式增量、工具结果、
   权限应答全部作为 `Msg` 走同一条收件箱；后台工作落在工作者线程池上，
   经可 poll 的唤醒信号叫醒循环。
-- **视图**：`Model + UiState → ScreenConfig`（`ui/screen.cpp`），由
-  `ui/painter.cpp` 交给 maya 渲染。
-  项目只用一个 maya 接缝 —— `FrameBuffer::render()` + `commit()` —— 刻意不用
-  `maya::run<App>`：循环是交付物，不是可以外包的细节。
+- **视图**：`Model + UiState → ScreenConfig`（`ui/screen.cpp`），再由项目自有
+  适配器翻译成 maya 元素，最终经 `ui/painter.cpp` 渲染。
+  `FrameBuffer::render()` + `commit()` 仍是终端渲染接缝；一个很小的动画宿主
+  适配器把帧请求接入 `RepaintClock`。项目仍刻意不用 `maya::run<App>`：循环是
+  交付物，不是可以外包的细节。
 - **终端驱动**：全仓库唯一动 `termios`、唯一写终端字节的地方。备用屏 + raw
   mode 按逆序还原；崩溃处理器（async-signal-safe 的 `write` + `tcsetattr`）
   覆盖析构不跑的那些路径。屏幕一致性是一个 `std::variant`：`Synced`
   （front 缓冲 == 终端像素，可差分）或 `Divergent`（尺寸变化或写失败 ——
   全量重序列化，逐行带行尾擦除，单次写出）。
-- **转录**：当前屏幕把消息投影到 maya 的 `Conversation` widget。助手正文
-  目前使用纯文本槽位；在飞状态另行投影。
+- **转录**：当前屏幕把消息投影成项目自有的 conversation/turn 组合，底层
+  继续使用 maya 元素。这样滚动和小高度降级策略归应用所有，也无需维护私有
+  maya fork。助手正文目前使用纯文本槽位；在飞状态另行投影。
 
 </details>
 
@@ -204,8 +208,7 @@ src/
 tests/        gtest 二进制 + 虚拟终端 + 宽度判据
 ```
 
-依赖经 FetchContent 固定版本：googletest、nlohmann_json、cpp-httplib ——
-以及[快速开始](#getting-started)里描述的本地 maya 检出。
+依赖经 FetchContent 固定版本：googletest、nlohmann_json、cpp-httplib 与 maya。
 
 </details>
 

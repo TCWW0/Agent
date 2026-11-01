@@ -30,19 +30,22 @@ This project exists to learn how a terminal coding agent actually works — by r
 
 Requirements: a C++26 toolchain, CMake ≥ 4.4, OpenSSL, and [Ollama](https://ollama.com) running locally.
 
-> **The maya checkout is not in this repo.** The current branch needs a local
-> [maya](https://github.com/1ay1/maya) working copy containing the
-> `Composer::CaretMode::SolidCell` extension (not yet upstream) — place it at
-> `./maya`, or point `FETCHCONTENT_SOURCE_DIR_MAYA` at it. Without it, CMake
-> fails by design rather than silently pinning an old upstream.
+The [maya](https://github.com/1ay1/maya) renderer is pinned as a submodule and
+CMake prefers that local checkout. If the submodule is absent, CMake can still
+fetch the same pinned commit through FetchContent.
 
 ```bash
-git clone git@github.com:TCWW0/Agent.git my_agent && cd my_agent
-# place your maya checkout at ./maya (see note above)
+git clone --recurse-submodules git@github.com:TCWW0/Agent.git my_agent && cd my_agent
 cmake -B build && cmake --build build -j
 ollama pull qwen3.5:latest        # or any model you have
 ./build/my_agent_repl
 ```
+
+For an existing checkout, initialize the dependency with
+`git submodule update --init --recursive`. The generated `build/compile_commands.json`
+is also the compilation database used by the repository's `.clangd` config.
+The checked-in VS Code workspace setting selects `clangd-22`, which is required
+for GCC 15's C++26 standard-library headers.
 
 Everything is configured through the environment:
 
@@ -161,19 +164,23 @@ See the [2026-10-09 milestone summary (Chinese)](docs/REFACTOR-MILESTONE-2026-10
   deltas, tool results, and permission responses all arrive as `Msg`s through
   one inbox; background work lands on a worker pool and pokes the loop through
   a pollable wake signal.
-- **View**: `Model + UiState → ScreenConfig` (`ui/screen.cpp`), rendered by
-  maya through `ui/painter.cpp`. The project uses one rendering seam — `FrameBuffer::render()` +
-  `commit()` — and deliberately not `maya::run<App>`: the loop is the
-  deliverable, not a detail to delegate.
+- **View**: `Model + UiState → ScreenConfig` (`ui/screen.cpp`), translated by
+  project-owned adapters into maya elements and rendered by `ui/painter.cpp`.
+  `FrameBuffer::render()` + `commit()` remain the terminal rendering seam; a
+  small animation-host adapter routes frame requests into `RepaintClock`.
+  `maya::run<App>` remains forbidden: the loop is the deliverable, not a
+  detail to delegate.
 - **Terminal driver**: the only place that touches `termios` or writes bytes.
   Alt-screen + raw mode restored in reverse order; a crash handler
   (async-signal-safe `write` + `tcsetattr`) covers the paths where destructors
   don't run. Screen coherence is a `std::variant`: `Synced` (front buffer ==
   terminal pixels, diffable) or `Divergent` (size changed or a write failed —
   full re-serialization, row-by-row with trailing erases, in a single write).
-- **Transcripts**: the active screen projects messages into maya's
-  `Conversation` widget. Assistant text currently uses plain text slots;
-  in-flight activity is projected separately.
+- **Transcripts**: the active screen projects messages into a project-owned
+  conversation/turn composition built from maya elements. This preserves the
+  runtime's scrolling and compact-height policies without carrying a private
+  maya fork. Assistant text currently uses plain text slots; in-flight
+  activity is projected separately.
 
 </details>
 
@@ -216,8 +223,7 @@ tests/        gtest binaries + virtual terminal + width oracle
 ```
 
 Dependencies are pinned via FetchContent: googletest, nlohmann_json,
-cpp-httplib — and the local maya checkout described in
-[Getting Started](#getting-started).
+cpp-httplib, and maya.
 
 </details>
 

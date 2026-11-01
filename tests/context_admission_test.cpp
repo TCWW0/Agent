@@ -20,6 +20,8 @@ my_agent::ContextManagementConfig config()
     return result;
 }
 
+my_agent::Request request();
+
 TEST(RequestPreparationTest, OptionalSystemPromptPreservesOrReplacesTheDraft)
 {
     const auto management = config();

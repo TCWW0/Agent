@@ -6,6 +6,12 @@ project (my_agent
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(
+    MY_AGENT_BUILD_TUI
+    "Build the Maya-backed terminal UI and the my_agent executable"
+    ON
+)
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -41,6 +47,7 @@ endif()
 
 FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 
+if(MY_AGENT_BUILD_TUI)
 # ── maya: TUI rendering library (slice #15) ─────────────────────────────────
 # We take maya ONLY for its renderer. The single seam we use is
 #   FrameBuffer::render(const Element&, const Theme&) -> const std::string&
@@ -50,10 +57,10 @@ FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 # — the very thing this project exists to demonstrate. Rendering only; the
 # event loop stays ours. Do not reintroduce run<Program>() as a "simplification".
 #
-# 当前分支依赖本地 Maya 的 SolidCell 扩展；动画宿主接缝在本地提交
-# 8da8707（及其祖先）中。默认使用项目内 maya/ 工作副本；显式传入
-# FETCHCONTENT_SOURCE_DIR_MAYA 时仍以调用方为准。
-# 该扩展尚未进入远程仓库，因此不能伪装成可回退到旧上游 pin。
+# 应用特有的 caret、状态栏、turn 组合与动画宿主接缝都由
+# include/my_agent/ui 下的适配器持有，不要求修改 Maya 源码。Maya 以
+# submodule 形式固定在仓库内；子模块未初始化时，FetchContent 仍可按
+# 同一提交从上游获取。显式的 FETCHCONTENT_SOURCE_DIR_MAYA 始终优先。
 #
 # Two options MUST be forced off before MakeAvailable:
 #   MAYA_BUILD_EXAMPLES — we don't build maya's demos.
@@ -63,28 +70,18 @@ FetchContent_MakeAvailable(googletest nlohmann_json httplib)
 set(MAYA_BUILD_EXAMPLES OFF CACHE INTERNAL "")
 set(MAYA_NATIVE_TUNING  OFF CACHE INTERNAL "")
 set(_my_agent_local_maya "${CMAKE_CURRENT_SOURCE_DIR}/maya")
-if(EXISTS "${_my_agent_local_maya}/CMakeLists.txt"
-   AND NOT FETCHCONTENT_SOURCE_DIR_MAYA)
-    set(
-        FETCHCONTENT_SOURCE_DIR_MAYA
-        "${_my_agent_local_maya}"
-        CACHE PATH "Local maya source checkout" FORCE
-    )
-endif()
-unset(_my_agent_local_maya)
-if(NOT FETCHCONTENT_SOURCE_DIR_MAYA)
-    message(FATAL_ERROR
-        "This branch requires a local Maya checkout containing "
-        "Composer::CaretMode::SolidCell. Place it at ${CMAKE_CURRENT_SOURCE_DIR}/maya "
-        "or set FETCHCONTENT_SOURCE_DIR_MAYA explicitly."
-    )
+if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_MAYA
+   AND EXISTS "${_my_agent_local_maya}/CMakeLists.txt")
+    set(FETCHCONTENT_SOURCE_DIR_MAYA "${_my_agent_local_maya}")
 endif()
 FetchContent_Declare(
     maya
-    SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_MAYA}"
+    GIT_REPOSITORY https://github.com/1ay1/maya.git
+    GIT_TAG d3d53262ce6888ff782e130fe174a7bd5da9fc58
     SYSTEM
 )
 FetchContent_MakeAvailable(maya)
+endif()
 
 include(GoogleTest)
 
@@ -421,7 +418,7 @@ add_executable(
 target_link_libraries(
     tool_loop_test
     PRIVATE
-        my_agent_core
+        my_agent_async_runtime
         GTest::gtest_main
 )
 
@@ -845,6 +842,7 @@ gtest_discover_tests(
 
 # 幽灵行 pty 复现探针。真 pty + 虚拟终端 + 官方宽度判据三层叠起来，才能把
 # 「屏幕上有幽灵行」变成一条会失败的断言。切片 #12 刻意让它红着。
+if(MY_AGENT_BUILD_TUI)
 add_executable(
     ghost_line_probe_test
     tests/ghost_line_probe_test.cpp
@@ -880,6 +878,7 @@ gtest_discover_tests(
     status_bar_test
     TEST_PREFIX "status_bar."
 )
+endif()
 
 # 语义屏幕（issue #26）：Model + UiState → maya widget Config 的纯投影。
 # transcript 与 dock 在结构上分离；视觉来自 maya 现成 widget，
@@ -922,6 +921,7 @@ gtest_discover_tests(
     TEST_PREFIX "transcript_guidance."
 )
 
+if(MY_AGENT_BUILD_TUI)
 add_library(
     my_agent_ui_screen
     src/ui/screen.cpp
@@ -1005,9 +1005,11 @@ gtest_discover_tests(
     caret_seam_test
     TEST_PREFIX "caret_seam."
 )
+endif()
 
 # TUI 事件循环：apply_key 是纯的（按键 -> UiState 变更 + 可选 Msg），
 # run_ui 才碰 poll 与终端。分开是为了让按键语义脱离 tty 可测。
+if(MY_AGENT_BUILD_TUI)
 add_library(
     my_agent_ui_loop
     src/ui/resize_watch.cpp
@@ -1073,6 +1075,7 @@ gtest_discover_tests(
     ui_loop_test
     TEST_PREFIX "ui_loop."
 )
+endif()
 
 add_library(
     my_agent_ui_config
@@ -1267,6 +1270,7 @@ target_compile_features(
     PUBLIC cxx_std_26
 )
 
+if(MY_AGENT_BUILD_TUI)
 add_library(
     my_agent_ui_transcript_viewport
     src/ui/transcript_viewport.cpp
@@ -1347,6 +1351,7 @@ gtest_discover_tests(
     terminal_test
     TEST_PREFIX "terminal."
 )
+endif()
 
 add_executable(
     terminal_session_test
@@ -1365,6 +1370,7 @@ gtest_discover_tests(
     TEST_PREFIX "terminal_session."
 )
 
+if(MY_AGENT_BUILD_TUI)
 add_executable(
     painter_test
     tests/painter_test.cpp
@@ -1381,6 +1387,7 @@ gtest_discover_tests(
     painter_test
     TEST_PREFIX "painter."
 )
+endif()
 
 # 检索质量基准：已知答案合成（tf×idf top-4 拼查询，gold = 该块自身），
 # 覆盖匹配，recall@k / MRR / µs。量具不是断言 —— 不进 ctest，跑一次出报告。
@@ -1428,6 +1435,7 @@ set_tests_properties(
 )
 
 # 阶段一演示终点：最小 REPL。只碰 dispatch / run_until_quiescent / model
+if(MY_AGENT_BUILD_TUI)
 add_executable(
     my_agent_repl
     src/repl/main.cpp
@@ -1441,10 +1449,12 @@ target_link_libraries(
         my_agent_prompt
         my_agent_ui_loop
 )
+endif()
 
 # maya rendering smoke test (slice #15). Proves the maya seam links and emits
 # bytes. The `maya` target comes from FetchContent above; wired SYSTEM to keep
 # maya's header warnings out of our build.
+if(MY_AGENT_BUILD_TUI)
 add_executable(
     maya_smoke_test
     tests/maya_smoke_test.cpp
@@ -1456,6 +1466,7 @@ target_link_libraries(
         maya
         GTest::gtest_main
 )
+endif()
 
 # Architectural boundary: the project owns its AsyncHost/event loop and only
 # consumes Maya's renderer/core seams. Keep this as a normal CTest entry so a
@@ -1467,7 +1478,9 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/maya_boundary.cmake
 )
 
-gtest_discover_tests(
-    maya_smoke_test
-    TEST_PREFIX "maya_smoke."
-)
+if(MY_AGENT_BUILD_TUI)
+    gtest_discover_tests(
+        maya_smoke_test
+        TEST_PREFIX "maya_smoke."
+    )
+endif()

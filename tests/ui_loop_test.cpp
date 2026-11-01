@@ -138,12 +138,12 @@ TEST(UiLoopTest, PasteStaysInComposerUntilTheUserSubmits)
 // 场景：AwaitingPermission 时按 y / n。
 // 领域语义：同一个按键在不同 phase 下含义不同 —— 这正是 apply_key 需要看 model 的
 // 唯一理由。审批期间 'y' 是批准而不是往输入行插入字母 'y'。批准/拒绝必须带上
-// pending_permission 的 id：审批的对象是某一次具体调用，用错 id 会批准另一个工具。
+// AwaitingPermission 的完整 ToolCallRef：审批必须绑定到具体 assistant/tool execution。
 // Red 原因：当前实现无视 phase，'y' 会被当成文本插进输入行。
 TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
 {
     my_agent::Model model;
-    model.thread.messages.push_back({
+    model.domain.thread.messages.push_back({
         .role = my_agent::Role::Assistant,
         .text = "",
         .tool_calls = {{
@@ -155,34 +155,24 @@ TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
                     .ref = my_agent::tool::ToolRef{7},
                     .effects = {my_agent::tool::Effect::WriteFs},
                 }},
-            .turn_id = my_agent::TurnId{3},
             .tool_exec_id = my_agent::ToolExecId{9},
         }},
         .id = my_agent::MessageId{11},
         .turn_id = my_agent::TurnId{3},
     });
-    model.phase = my_agent::AwaitingPermission{
-        .turn_id = my_agent::TurnId{3},
-        .tool_exec_id = my_agent::ToolExecId{9},
-        .id = "call_7f3a",
+    const my_agent::ToolCallRef call{
         .assistant_message_id = my_agent::MessageId{11},
-    };
-    model.pending_permission = my_agent::PendingPermission{
-        .id = "call_7f3a",
-        .turn_id = my_agent::TurnId{3},
         .tool_exec_id = my_agent::ToolExecId{9},
     };
+    model.phase = my_agent::AwaitingPermission{.call = call};
 
     UiState approve_ui;
     const KeyOutcome approved =
         apply_key(Key{.kind = Key::Kind::Text, .text = "y"}, approve_ui, model);
     ASSERT_TRUE(approved.msg.has_value());
     ASSERT_TRUE(std::holds_alternative<my_agent::PermissionApprove>(*approved.msg));
-    EXPECT_EQ("call_7f3a", std::get<my_agent::PermissionApprove>(*approved.msg).id);
-    EXPECT_EQ(my_agent::TurnId{3},
-              std::get<my_agent::PermissionApprove>(*approved.msg).turn_id);
-    EXPECT_EQ(my_agent::ToolExecId{9},
-              std::get<my_agent::PermissionApprove>(*approved.msg).tool_exec_id);
+    EXPECT_EQ(call,
+              std::get<my_agent::PermissionApprove>(*approved.msg).call);
     EXPECT_TRUE(approve_ui.input.empty()) << "审批期间的按键不该进输入行";
 
     UiState reject_ui;
@@ -190,9 +180,13 @@ TEST(UiLoopTest, InterpretsYesAndNoAsApprovalOnlyWhileAwaitingPermission)
         apply_key(Key{.kind = Key::Kind::Text, .text = "n"}, reject_ui, model);
     ASSERT_TRUE(rejected.msg.has_value());
     ASSERT_TRUE(std::holds_alternative<my_agent::PermissionReject>(*rejected.msg));
-    EXPECT_EQ("call_7f3a", std::get<my_agent::PermissionReject>(*rejected.msg).id);
+    EXPECT_EQ(call,
+              std::get<my_agent::PermissionReject>(*rejected.msg).call);
 
-    model.pending_permission->tool_exec_id = my_agent::ToolExecId{10};
+    model.phase = my_agent::AwaitingPermission{.call = {
+        .assistant_message_id = my_agent::MessageId{11},
+        .tool_exec_id = my_agent::ToolExecId{10},
+    }};
     UiState invalid_ui;
     EXPECT_FALSE(apply_key(
         Key{.kind = Key::Kind::Text, .text = "y"}, invalid_ui, model).msg.has_value());
@@ -423,7 +417,7 @@ TEST(UiLoopTest, CtrlRResumesAQueuedBlockedSession)
         .reason = my_agent::BlockReason::ContextLimit,
         .message = "request exceeds the available context budget",
     };
-    model.queued_messages.push_back(my_agent::QueuedMessage{
+    model.session.queued_messages.push_back(my_agent::QueuedMessage{
         .turn_id = my_agent::TurnId{1},
         .message_id = my_agent::MessageId{1},
         .text = "waiting prompt",
@@ -441,7 +435,7 @@ TEST(UiLoopTest, CtrlXClearsQueuedPromptsWithoutTouchingTheDraft)
 {
     UiState ui{.input = "draft", .cursor = 3};
     my_agent::Model model;
-    model.queued_messages.push_back(my_agent::QueuedMessage{
+    model.session.queued_messages.push_back(my_agent::QueuedMessage{
         .turn_id = my_agent::TurnId{1},
         .message_id = my_agent::MessageId{1},
         .text = "waiting prompt",
@@ -455,7 +449,7 @@ TEST(UiLoopTest, CtrlXClearsQueuedPromptsWithoutTouchingTheDraft)
     EXPECT_EQ("draft", ui.input);
     EXPECT_EQ(3u, ui.cursor);
 
-    model.queued_messages.clear();
+    model.session.queued_messages.clear();
     EXPECT_FALSE(apply_key(
         Key{.kind = Key::Kind::ClearQueue}, ui, model).msg.has_value());
 }
@@ -899,7 +893,7 @@ TEST(UiLoopTest, OversizedPasteShowsContextLimitAndCtrlXClearsQueue)
 
     stop();
     EXPECT_EQ(std::size_t{0}, stream_calls.load());
-    EXPECT_TRUE(host.model().queued_messages.empty());
+    EXPECT_TRUE(host.model().session.queued_messages.empty());
     EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(host.model().phase));
 }
 

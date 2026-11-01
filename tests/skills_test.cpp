@@ -383,7 +383,8 @@ TEST_F(SkillEngineTest, ReadToolAllowsSkillDirectoriesWhileStillRefusingElsewher
 
     const my_agent::tool::RegisteredTool read = my_agent::tool::detail::make_read_tool(
         workspace,
-        skills::SkillEngine{roots()}.directories()
+        skills::SkillEngine{roots()}.directories(),
+        /*allow_temporary_root=*/false
     );
 
     const my_agent::tool::ExecResult allowed = read.handler(nlohmann::json{

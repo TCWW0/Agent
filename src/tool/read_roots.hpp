@@ -15,7 +15,9 @@ namespace my_agent::tool::detail {
 // session. Expanding these roots never grants write access.
 class ReadRoots {
 public:
-    explicit ReadRoots(const std::filesystem::path& workspace_root);
+    explicit ReadRoots(
+        const std::filesystem::path& workspace_root,
+        bool allow_temporary_root = true);
 
     [[nodiscard]] const std::filesystem::path& workspace_root() const noexcept;
     [[nodiscard]] std::expected<void, std::string> add(

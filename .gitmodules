@@ -1,0 +1,3 @@
+[submodule "maya"]
+	path = maya
+	url = https://github.com/1ay1/maya.git

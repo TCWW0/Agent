@@ -265,7 +265,7 @@ TEST(TS006CoreTest, IgnoresReportWithMismatchedToolRef)
     EXPECT_TRUE(std::holds_alternative<ToolCall::Pending>(
         assistant.tool_calls.front().status));
     EXPECT_TRUE(std::holds_alternative<my_agent::ExecutingTool>(
-        ignored.model.session.phase));
+        ignored.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(ignored.cmd));
 }
 
@@ -283,7 +283,7 @@ TEST(TS006CoreTest, CancelSettlesAllPendingCallsBeforeAdvancing)
         ASSERT_NE(nullptr, status);
         EXPECT_EQ(std::string{kCancelledOutput}, status->output);
     }
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(cancelled.model.session.phase));
+    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(cancelled.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::CancelOperation>(cancelled.cmd));
 }
 
@@ -303,7 +303,7 @@ TEST(TS006CoreTest, LateReportCannotOverwriteCancelledCall)
         &assistant.tool_calls.front().status);
     ASSERT_NE(nullptr, status);
     EXPECT_EQ(kCancelledOutput, status->output);
-    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(late.model.session.phase));
+    EXPECT_TRUE(std::holds_alternative<my_agent::Idle>(late.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(late.cmd));
 }
 

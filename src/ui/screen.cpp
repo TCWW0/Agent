@@ -12,6 +12,7 @@
 #include <maya/widget/status_bar.hpp>
 #include <maya/widget/turn.hpp>
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -131,7 +132,7 @@ void append_queue_preview(
     }
 }
 
-maya::Element compact_status_element(const maya::StatusBar::Config& config)
+maya::Element compact_status_element(const StatusBarConfig& config)
 {
     using namespace maya::dsl;
     std::string content = config.phase.glyph;
@@ -147,6 +148,31 @@ maya::Element compact_status_element(const maya::StatusBar::Config& config)
     };
     return (maya::Element{std::move(label)}
             | height(1) | overflow(maya::Overflow::Hidden)).build();
+}
+
+maya::Element compact_composer_element(const ComposerConfig& config)
+{
+    using namespace maya::dsl;
+
+    maya::Color border_color = config.accent_color;
+    if (config.state == maya::Composer::State::AwaitingPermission) {
+        border_color = config.warn_color;
+    } else if (config.state == maya::Composer::State::Streaming
+               || config.state == maya::Composer::State::ExecutingTool) {
+        border_color = config.active_color;
+    }
+
+    std::string content = "\xe2\x9d\xaf ";  // ❯
+    content += config.text;
+    maya::TextElement input{
+        .content = std::move(content),
+        .style = maya::Style{}.with_fg(config.text_color),
+        .wrap = maya::TextWrap::TruncateEnd,
+    };
+    return (v(maya::Element{std::move(input)})
+            | padding(0, 1)
+            | border(maya::BorderStyle::Round)
+            | bcolor(border_color)).build();
 }
 
 maya::Element compact_permission_element(
@@ -189,6 +215,129 @@ maya::Element too_small_element()
             | height(1) | overflow(maya::Overflow::Hidden)).build();
 }
 
+maya::Element turn_slot_element(const maya::Turn::BodySlot& slot)
+{
+    return std::visit(
+        [](const auto& value) -> maya::Element {
+            using Slot = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Slot, maya::Turn::PlainText>) {
+                return maya::dsl::text(
+                    value.content,
+                    maya::Style{}.with_fg(value.color)).build();
+            } else if constexpr (std::is_same_v<
+                                     Slot, maya::Turn::MarkdownText>) {
+                return maya::markdown(value.content);
+            } else if constexpr (std::is_same_v<
+                                     Slot, maya::AgentTimeline::Config>) {
+                return maya::AgentTimeline{value}.build();
+            } else if constexpr (std::is_same_v<
+                                     Slot, maya::Permission::Config>) {
+                return maya::Permission{value}.build();
+            } else {
+                return value;
+            }
+        },
+        slot);
+}
+
+bool empty_text_element(const maya::Element& element)
+{
+    const maya::TextElement* text = maya::as_text(element);
+    return text != nullptr && text->content.empty();
+}
+
+std::vector<maya::Element> turn_body_elements(
+    const maya::Turn::Config& config)
+{
+    using namespace maya::dsl;
+    std::vector<maya::Element> rows;
+    rows.reserve(config.body.size() * 2);
+    for (const auto& slot : config.body) {
+        maya::Element element = turn_slot_element(slot);
+        if (empty_text_element(element)) {
+            continue;
+        }
+        if (!rows.empty()) {
+            rows.push_back(blank().build());
+        }
+        rows.push_back(std::move(element));
+    }
+    return rows;
+}
+
+// D3's Turn widget lets its header component consume the body's allocation
+// when embedded in this project's independently-scrolled transcript. Keep the
+// renderer dependency, but own the small host composition seam so message
+// bodies remain observable without patching Maya.
+maya::Element turn_element(const maya::Turn::Config& config)
+{
+    using namespace maya::dsl;
+
+    const maya::Style rail_style = maya::Style{}.with_fg(config.rail_color);
+    const auto rail_row = [&rail_style](maya::Element content) {
+        return h(
+            text("\xe2\x94\x83", rail_style),
+            text("  "),
+            std::move(content) | grow(1.0f)).build();
+    };
+    const auto empty_rail_row = [&rail_style] {
+        return h(text("\xe2\x94\x83", rail_style)).build();
+    };
+
+    std::vector<maya::Element> rows;
+    if (!config.continuation) {
+        std::vector<maya::Element> header_parts;
+        header_parts.reserve(4);
+        header_parts.push_back(text(
+            config.glyph,
+            maya::Style{}.with_fg(config.rail_color)).build());
+        header_parts.push_back(text(" ").build());
+        header_parts.push_back(text(
+            config.label,
+            maya::Style{}.with_fg(config.rail_color).with_bold()).build());
+        header_parts.push_back(spacer().build());
+        if (config.meta_element) {
+            header_parts.push_back(*config.meta_element);
+        } else {
+            header_parts.push_back(text(
+                config.meta,
+                maya::Style{}.with_fg(maya::Color::bright_black())
+                    .with_dim()).build());
+        }
+        header_parts.push_back(text(" ").build());
+        rows.push_back(rail_row(h(std::move(header_parts)).build()));
+        rows.push_back(empty_rail_row());
+    }
+
+    std::vector<maya::Element> body = turn_body_elements(config);
+    for (maya::Element& row : body) {
+        rows.push_back(empty_text_element(row)
+            ? empty_rail_row()
+            : rail_row(std::move(row)));
+    }
+    if (!config.error.empty()) {
+        rows.push_back(empty_rail_row());
+        rows.push_back(rail_row(h(
+            text("\xe2\x9a\xa0  ",
+                 maya::Style{}.with_fg(maya::Color::red()).with_bold()),
+            text(config.error,
+                 maya::Style{}.with_fg(maya::Color::red())
+                     .with_dim().with_italic())).build()));
+    }
+
+    maya::Element turn = v(std::move(rows)).build();
+
+    if (!config.checkpoint_above) {
+        return turn;
+    }
+    return v(
+        maya::CheckpointDivider{{
+            .label = config.checkpoint_label,
+            .color = config.checkpoint_color,
+        }}.build(),
+        std::move(turn)).build();
+}
+
 maya::Element dock_element_for_density(
     const DockConfig& dock, DockDensity density)
 {
@@ -224,8 +373,8 @@ maya::Element dock_element_for_density(
             rows.push_back(transcript_guidance_element(dock.transcript_guidance)
                            | height(1) | overflow(maya::Overflow::Hidden));
             append_queue_preview(rows, dock);
-            rows.push_back(maya::Composer{dock.composer}.build());
-            rows.push_back(maya::StatusBar{dock.status}.build());
+            rows.push_back(composer_element(dock.composer));
+            rows.push_back(status_bar_element(dock.status));
         }
     } else {
         switch (density) {
@@ -235,34 +384,32 @@ maya::Element dock_element_for_density(
                     dock.transcript_guidance)
                     | height(1) | overflow(maya::Overflow::Hidden));
                 append_queue_preview(rows, dock);
-                rows.push_back(maya::Composer{dock.composer}.build());
-                rows.push_back(maya::StatusBar{dock.status}.build());
+                rows.push_back(composer_element(dock.composer));
+                rows.push_back(status_bar_element(dock.status));
                 break;
             case DockDensity::NoBreathing:
                 rows.push_back(transcript_guidance_element(
                     dock.transcript_guidance)
                     | height(1) | overflow(maya::Overflow::Hidden));
-                rows.push_back(maya::Composer{dock.composer}.build());
-                rows.push_back(maya::StatusBar{dock.status}.build());
+                rows.push_back(composer_element(dock.composer));
+                rows.push_back(status_bar_element(dock.status));
                 break;
             case DockDensity::CompactStatus:
                 rows.push_back(transcript_guidance_element(
                     dock.transcript_guidance)
                     | height(1) | overflow(maya::Overflow::Hidden));
                 append_queue_preview(rows, dock);
-                rows.push_back(maya::Composer{dock.composer}.build());
+                rows.push_back(composer_element(dock.composer));
                 rows.push_back(compact_status_element(dock.status));
                 break;
             case DockDensity::NoGuidance:
                 append_queue_preview(rows, dock);
-                rows.push_back(maya::Composer{dock.composer}.build());
+                rows.push_back(composer_element(dock.composer));
                 rows.push_back(compact_status_element(dock.status));
                 break;
             case DockDensity::CompactComposer: {
                 append_queue_preview(rows, dock);
-                maya::Composer::Config composer = dock.composer;
-                composer.hide_footer = true;
-                rows.push_back(maya::Composer{std::move(composer)}.build());
+                rows.push_back(compact_composer_element(dock.composer));
                 rows.push_back(compact_status_element(dock.status));
                 break;
             }
@@ -310,6 +457,243 @@ DockDensity choose_dock_density(
 }
 
 }  // namespace
+
+maya::Element conversation_element(const ConversationConfig& config)
+{
+    if (config.fill_available_height) {
+        const auto& base = static_cast<const maya::Conversation::Config&>(
+            config);
+        return maya::Conversation{base}.build();
+    }
+
+    using namespace maya::dsl;
+    std::vector<maya::Element> rows;
+    rows.reserve(config.turns.size() * 2 + 1);
+    for (std::size_t index = 0; index < config.turns.size(); ++index) {
+        if (index > 0 && !config.turns[index].continuation) {
+            rows.push_back(maya::Conversation::divider());
+        }
+        const bool compact_tail = config.compact_tail
+            && index + 1 == config.turns.size();
+        if (!compact_tail) {
+            rows.push_back(turn_element(config.turns[index]));
+            continue;
+        }
+
+        std::vector<maya::Element> body = turn_body_elements(
+            config.turns[index]);
+        rows.push_back(v(std::move(body)).build());
+    }
+    if (config.in_flight) {
+        rows.push_back(maya::ActivityIndicator{*config.in_flight}.build());
+    }
+    return (v(std::move(rows)) | padding(0, 1)).build();
+}
+
+maya::Element composer_element(const ComposerConfig& config)
+{
+    maya::Composer::Config base =
+        static_cast<const maya::Composer::Config&>(config);
+
+    if (config.solid_cell) {
+        // Maya's stock painted caret inserts a block. Remove the code point
+        // under the cursor first so that insertion becomes replacement and
+        // therefore cannot shift the suffix. Expiring the stock blink keeps
+        // that replacement solid and avoids a second animation cadence.
+        const std::size_t cursor = static_cast<std::size_t>(std::clamp(
+            base.cursor, 0, static_cast<int>(base.text.size())));
+        if (cursor < base.text.size()) {
+            std::size_t next = cursor + 1;
+            while (next < base.text.size()
+                   && (static_cast<unsigned char>(base.text[next]) & 0xc0)
+                       == 0x80) {
+                ++next;
+            }
+            base.text.erase(cursor, next - cursor);
+        }
+        base.last_edit_ms = 1;
+    }
+
+    return maya::Composer{std::move(base)}.build();
+}
+
+maya::Element status_bar_element(const StatusBarConfig& config)
+{
+    using namespace maya::dsl;
+
+    const auto& base = static_cast<const maya::StatusBar::Config&>(config);
+    if (!config.status_banner.text.empty()) {
+        return maya::StatusBar{base}.build();
+    }
+
+    constexpr std::string_view separator = " \xc2\xb7 ";
+    constexpr int separator_width = maya::unicode::str_width(separator);
+    const auto dim = [](maya::Color color) {
+        const bool already_muted =
+            color.kind() == maya::Color::Kind::Named
+            && color.index() == static_cast<std::uint8_t>(
+                maya::AnsiColor::BrightBlack);
+        return already_muted
+            ? maya::Style{}.with_fg(color)
+            : maya::Style{}.with_fg(color).with_dim();
+    };
+
+    maya::Element activity = component(
+        [config, dim, separator](int width, int) {
+        using namespace maya::dsl;
+        if (width <= 0) {
+            return blank().build();
+        }
+
+        const maya::Color muted = maya::Color::bright_black();
+        const auto width_of = [](const maya::Element& element) {
+            return maya::measure_element(element, 1 << 14).width.value;
+        };
+
+        struct Shape {
+            bool tokens;
+            bool stream;
+            bool elapsed;
+            bool bar;
+            bool verb;
+            bool gauge;
+            bool request;
+            bool turn;
+            bool badge;
+        };
+        static constexpr Shape ladder[] = {
+            {true, true, true, true, true, true, true, true, true},
+            {false, true, true, true, true, true, true, true, true},
+            {false, true, true, true, true, true, true, false, true},
+            {false, true, true, true, true, true, false, false, true},
+            {false, false, true, true, true, true, false, false, true},
+            {false, false, false, true, true, true, false, false, true},
+            {false, false, false, false, true, true, false, false, true},
+            {false, false, false, false, false, true, false, false, true},
+            {false, false, false, false, false, false, false, false, true},
+            {false, false, false, false, false, false, false, false, false},
+        };
+
+        maya::Element right;
+        maya::Element phase_element;
+        maya::Element middle;
+        int fixed_width = 0;
+        bool kept_verb = false;
+        bool kept_gauge = false;
+        for (const Shape& shape : ladder) {
+            maya::PhaseChip::Config phase = config.phase;
+            phase.verb_width = shape.verb ? 10 : 0;
+            if (!shape.elapsed) {
+                phase.elapsed_secs = -1.0f;
+            }
+
+            maya::ContextGauge::Config context = config.context;
+            context.show_bar = shape.bar;
+            context.show_tokens = shape.tokens;
+
+            std::vector<maya::Element> parts;
+            bool emitted = false;
+            auto append = [&](maya::Element element) {
+                if (emitted) {
+                    parts.push_back(text(separator, dim(muted)));
+                }
+                parts.push_back(std::move(element));
+                emitted = true;
+            };
+            if (shape.stream && !config.token_stream.adaptive) {
+                append(maya::TokenStreamSparkline{
+                    config.token_stream}.build());
+            }
+            if (shape.badge && width_of(config.model_badge) > 0) {
+                append(config.model_badge);
+            }
+            if (shape.request && width_of(config.request_usage) > 0) {
+                append(config.request_usage);
+            }
+            if (shape.turn && width_of(config.turn_usage) > 0) {
+                append(config.turn_usage);
+            }
+            if (shape.gauge && config.context.max > 0) {
+                append(maya::ContextGauge{context}.build());
+            }
+            if (emitted) {
+                parts.push_back(text(" "));
+            }
+
+            maya::Element candidate_right = h(std::move(parts)).build();
+            maya::Element candidate_phase = maya::PhaseChip{phase}.build();
+            const bool has_right = width_of(candidate_right) > 0;
+            const int middle_min =
+                shape.stream && config.token_stream.adaptive
+                ? 8 + separator_width
+                : (has_right ? 1 : 0);
+            const int needed = 3 + width_of(candidate_phase) + middle_min
+                + width_of(candidate_right);
+            const bool last = &shape == &ladder[std::size(ladder) - 1];
+            if (needed <= width || last) {
+                right = std::move(candidate_right);
+                phase_element = std::move(candidate_phase);
+                fixed_width = needed;
+                kept_verb = shape.verb;
+                kept_gauge = shape.gauge && config.context.max > 0;
+                middle = shape.stream && config.token_stream.adaptive
+                    ? (h(maya::TokenStreamSparkline{
+                            config.token_stream}.build(),
+                         text(separator, dim(muted))) | grow(1.0f)).build()
+                    : (has_right
+                        ? (h(spacer(), text(" ")) | grow(1.0f)).build()
+                        : maya::Element{spacer().build()});
+                break;
+            }
+        }
+
+        std::vector<maya::Element> left_parts;
+        left_parts.push_back(text(" "));
+        if (!config.breadcrumb.title.empty() && kept_verb && kept_gauge) {
+            constexpr int chip_decor = 2;
+            constexpr int min_title = 12;
+            const int leftover = width - fixed_width - separator_width;
+            if (leftover >= chip_decor + min_title) {
+                maya::TitleChip::Config breadcrumb = config.breadcrumb;
+                const std::size_t cap = breadcrumb.max_chars > 0
+                    ? breadcrumb.max_chars
+                    : 28;
+                breadcrumb.max_chars = std::min<std::size_t>(
+                    static_cast<std::size_t>(leftover - chip_decor), cap);
+                maya::Element chip = maya::TitleChip{breadcrumb}.build();
+                if (width_of(chip) + separator_width
+                    <= width - fixed_width) {
+                    left_parts.push_back(std::move(chip));
+                    left_parts.push_back(text(separator, dim(muted)));
+                }
+            }
+        }
+        const maya::Style rail_style = config.phase.breathing
+            ? maya::Style{}.with_fg(config.phase_color).with_bold()
+            : maya::Style{}.with_fg(config.phase_color).with_dim();
+        left_parts.push_back(text("\xe2\x96\x8c", rail_style));
+        left_parts.push_back(text(" "));
+        left_parts.push_back(std::move(phase_element));
+
+        return (h(h(std::move(left_parts)), std::move(middle),
+                  std::move(right))
+                | overflow(maya::Overflow::Hidden)).build();
+        });
+
+    std::vector<maya::Element> rows;
+    rows.reserve(3);
+    rows.push_back(maya::PhaseAccent{{
+        .color = config.phase_color,
+        .position = maya::PhaseAccent::Position::Top,
+    }}.build());
+    rows.push_back((std::move(activity)
+                    | height(1) | overflow(maya::Overflow::Hidden)).build());
+    rows.push_back(maya::PhaseAccent{{
+        .color = config.phase_color,
+        .position = maya::PhaseAccent::Position::Bottom,
+    }}.build());
+    return v(std::move(rows)).build();
+}
 
 maya::Element dock_element(const DockConfig& dock)
 {
@@ -482,17 +866,17 @@ maya::Composer::ProfileChip profile_chip(
     return {.label = "write", .color = theme.success};
 }
 
-maya::Composer::Config composer_config(
+ComposerConfig composer_config(
     const Model& model, const UiState& ui, const maya::Theme& theme)
 {
     const ComposerDisplayText display = render_paste_placeholders(
         ui.input,
         ui.cursor == std::string::npos ? ui.input.size() : ui.cursor,
         ui.pastes);
-    maya::Composer::Config cfg;
+    ComposerConfig cfg;
     cfg.text = display.text;
     cfg.cursor = static_cast<int>(display.cursor);
-    cfg.caret_mode = maya::Composer::CaretMode::SolidCell;
+    cfg.solid_cell = true;
     cfg.state = composer_state(model);
     cfg.active_color = phase_color(model, theme);
     cfg.text_color = theme.text;
@@ -569,10 +953,10 @@ std::optional<QueuePreviewConfig> queue_preview_config(
     };
 }
 
-maya::Conversation::Config transcript_config(
+ConversationConfig transcript_config(
     const Model& model, const maya::Theme& theme)
 {
-    maya::Conversation::Config cfg;
+    ConversationConfig cfg;
     cfg.fill_available_height = false;
     const Message* last = nullptr;
     if (const auto* streaming = std::get_if<my_agent::Streaming>(
@@ -739,14 +1123,14 @@ std::string context_quality_badge(
 
 // StatusBar 与 agentty 使用同一种映射方式：每类信息进入对应的子组件，
 // 不再把整行预先压成一个字符串。这样 Maya 才能按真实宽度逐级降级。
-maya::StatusBar::Config status_config(
+StatusBarConfig status_config(
     const Model& model,
     const StatusBarInput& status,
     const TokenRateHistory& token_rate_history,
     const maya::Theme& theme,
     const ToolActivityProjection& activity)
 {
-    maya::StatusBar::Config cfg;
+    StatusBarConfig cfg;
     const PhaseDisplay display = phase_display(model, activity);
     cfg.phase_color = phase_color(model, theme);
     cfg.phase.glyph = display.glyph;

@@ -129,8 +129,8 @@ my_agent::Step started_stream()
 
 const my_agent::Message& assistant_message(const my_agent::Model& model)
 {
-    for (auto it = model.thread.messages.rbegin();
-         it != model.thread.messages.rend();
+    for (auto it = model.domain.thread.messages.rbegin();
+         it != model.domain.thread.messages.rend();
          ++it) {
         if (it->role == my_agent::Role::Assistant && !it->tool_calls.empty()) {
             return *it;
@@ -138,7 +138,7 @@ const my_agent::Message& assistant_message(const my_agent::Model& model)
     }
 
     ADD_FAILURE() << "expected an assistant message containing a tool call";
-    return model.thread.messages.back();
+    return model.domain.thread.messages.back();
 }
 
 }  // namespace
@@ -200,7 +200,8 @@ TEST(TS005HostTest, UnknownCallKeepsRawFieldsAndProducesAvailableToolFailure)
     host.run_until_quiescent();
 
     ASSERT_TRUE(std::holds_alternative<my_agent::Idle>(host.model().phase));
-    EXPECT_FALSE(host.model().pending_permission.has_value());
+    EXPECT_FALSE(std::holds_alternative<my_agent::AwaitingPermission>(
+        host.model().phase));
 
     const my_agent::Message& assistant = assistant_message(host.model());
     ASSERT_EQ(std::size_t{1}, assistant.tool_calls.size());

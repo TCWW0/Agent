@@ -42,6 +42,31 @@ TEST(PainterTest, RendersWithExplicitSizeAndInjectedWriter)
     EXPECT_NE(written.find("painter"), std::string::npos);
 }
 
+TEST(PainterTest, RendersTurnBodiesInANormalHeightViewport)
+{
+    my_agent::ui::ScreenConfig screen;
+    screen.transcript.fill_available_height = false;
+    screen.transcript.turns.push_back(maya::Turn::Config{
+        .label = "you",
+        .body = {maya::Turn::PlainText{.content = "NORMAL_USER_BODY"}},
+    });
+    screen.transcript.turns.push_back(maya::Turn::Config{
+        .label = "agent",
+        .body = {maya::Turn::PlainText{.content = "NORMAL_AGENT_BODY"}},
+    });
+
+    my_agent::ui::Painter painter;
+    std::string written;
+    const my_agent::ui::WriteSink writer = [&written](std::string_view bytes) {
+        written.append(bytes);
+        return true;
+    };
+
+    ASSERT_TRUE(painter.render(screen, my_agent::ui::Size{80, 24}, writer));
+    EXPECT_NE(written.find("NORMAL_USER_BODY"), std::string::npos) << written;
+    EXPECT_NE(written.find("NORMAL_AGENT_BODY"), std::string::npos) << written;
+}
+
 TEST(PainterTest, FrozenTranscriptHoldsItsPositionWhileTailContinuesGrowing)
 {
     my_agent::ui::Painter painter;

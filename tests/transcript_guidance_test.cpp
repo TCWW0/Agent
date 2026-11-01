@@ -26,7 +26,7 @@ TEST(TranscriptGuidanceTest, RevisionTracksMeaningfulTranscriptChangesOnly)
     EXPECT_GT(initial, 0u);
     EXPECT_EQ(initial, tracker.observe(model));
 
-    model.session.phase = my_agent::Streaming{};
+    model.phase = my_agent::Streaming{};
     model.domain.profile = my_agent::Profile::Ask;
     model.session.stream_telemetry.output_bytes = 42;
     model.session.stream_telemetry.generation = 7;

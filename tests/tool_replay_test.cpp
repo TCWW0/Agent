@@ -31,6 +31,21 @@ bool valid_utf8(std::string_view text)
         } else {
             return false;
         }
+        if (index + width > text.size()) {
+            return false;
+        }
+        for (std::size_t offset = 1; offset < width; ++offset) {
+            if ((static_cast<unsigned char>(text[index + offset]) & 0xc0U)
+                != 0x80U) {
+                return false;
+            }
+        }
+        index += width;
+    }
+    return true;
+}
+
+}  // namespace
 
 TEST(ToolReplayProjectionTest, TinyBudgetStillProducesAnAuditableBoundedView)
 {
@@ -146,7 +161,6 @@ TEST(ToolReplayProjectionTest, PreservesSmallResultsAndIsDeterministic)
                             .status = my_agent::ToolCall::Done{
                                 .output = "byte-identical result",
                             },
-                            .turn_id = my_agent::TurnId{1},
                         },
                     },
                 },
@@ -193,7 +207,6 @@ TEST(ToolReplayProjectionTest, EphemeralStaleResultsAreNotReplayed)
             .name = "ephemeral",
             .args = nlohmann::json::object(),
             .status = my_agent::ToolCall::Done{.output = "tool output"},
-            .turn_id = my_agent::TurnId{turn},
         };
     };
     const my_agent::Request request{
@@ -246,7 +259,6 @@ TEST(ToolReplayProjectionTest, SharesBudgetAndPrioritizesRecentResults)
             .status = my_agent::ToolCall::Done{
                 .output = std::string(9000, 'x'),
             },
-            .turn_id = my_agent::TurnId{turn},
         };
     };
     const my_agent::Request request{
@@ -310,21 +322,6 @@ TEST(ToolReplayProjectionTest, SharesBudgetAndPrioritizesRecentResults)
         at_8k.request.messages.front().tool_calls.front().output().size(),
         request.messages.front().tool_calls.front().output().size());
 }
-        if (index + width > text.size()) {
-            return false;
-        }
-        for (std::size_t offset = 1; offset < width; ++offset) {
-            if ((static_cast<unsigned char>(text[index + offset]) & 0xc0U)
-                != 0x80U) {
-                return false;
-            }
-        }
-        index += width;
-    }
-    return true;
-}
-
-}  // namespace
 
 TEST(ToolReplayPolicyTest, ValidatesBoundsAndScalesBudgetMonotonically)
 {
@@ -403,19 +400,10 @@ TEST(ToolReplayProjectionTest, BoundsHeadTailAtUtf8CodePointBoundaries)
             policy,
             32);
 
-    ASSERT_EQ(std::size_t{1}, projection.replay.items.size());
-    const auto& item = projection.replay.items.front();
-    EXPECT_TRUE(item.elided);
-    EXPECT_EQ("read", item.tool_name);
-    EXPECT_EQ(103u, item.original_bytes);
-    EXPECT_FALSE(item.original_digest.value.empty());
-    EXPECT_NE(item.original_bytes, item.projected_bytes);
-    EXPECT_NE(item.projected_text.find("elided"), std::string::npos);
-    EXPECT_NE(item.projected_text.find("头"), std::string::npos);
-    EXPECT_NE(item.projected_text.find("😀"), std::string::npos);
-    EXPECT_TRUE(valid_utf8(item.projected_text));
-
     const std::string& wire_result =
         projection.request.messages.front().tool_calls.front().output();
-    EXPECT_EQ(item.projected_text, wire_result);
+    EXPECT_NE(wire_result.find("elided"), std::string::npos);
+    EXPECT_NE(wire_result.find("头"), std::string::npos);
+    EXPECT_NE(wire_result.find("😀"), std::string::npos);
+    EXPECT_TRUE(valid_utf8(wire_result));
 }

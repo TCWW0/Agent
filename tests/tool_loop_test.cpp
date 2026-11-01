@@ -1,4 +1,4 @@
-#include "my_agent/runtime/agent.hpp"
+#include "my_agent/runtime/async_host.hpp"
 #include "my_agent/tool/session_services.hpp"
 #include "request_preparation_test_support.hpp"
 
@@ -21,6 +21,51 @@
 
 namespace {
 
+constexpr my_agent::StreamRef kFirstStream{
+    .turn_id = my_agent::TurnId{1},
+    .stream_id = my_agent::StreamId{1},
+};
+
+std::shared_ptr<const my_agent::tool::ToolRuntime> headless_session_runtime()
+{
+    const auto root = std::filesystem::temp_directory_path()
+        / "my_agent_tool_loop_runtime";
+    const my_agent::tool::SessionServices services{
+        my_agent::tool::SessionFacts{
+            .workspace_root = std::filesystem::current_path(),
+            .memory_roots = {
+                .user = root / "memory-user",
+                .project = root / "memory-project",
+            },
+            .skill_roots = {},
+            .docs = {
+                .root = root / "docs",
+                .root_missing = true,
+            },
+        }};
+    return std::make_shared<const my_agent::tool::ToolRuntime>(
+        services.registrations());
+}
+
+class HeadlessRunner {
+public:
+    HeadlessRunner(my_agent::StreamEffect stream,
+        std::shared_ptr<const my_agent::tool::ToolRuntime> runtime)
+        : host_{std::move(stream), std::move(runtime)}
+    {
+    }
+
+    const my_agent::Model& dispatch(my_agent::Msg msg)
+    {
+        host_.dispatch(std::move(msg));
+        host_.run_until_quiescent();
+        return host_.model();
+    }
+
+private:
+    my_agent::AsyncHost host_;
+};
+
 my_agent::Msg resolved_core_tool_call(
     std::string id,
     std::string name,
@@ -28,6 +73,7 @@ my_agent::Msg resolved_core_tool_call(
 {
     const bool is_read = name == "read";
     return my_agent::Msg{my_agent::ResolvedStreamToolCall{
+        kFirstStream,
         std::move(id),
         std::move(name),
         std::move(args),
@@ -45,9 +91,7 @@ my_agent::ToolExecOutput execution_output(
     my_agent::tool::ExecResult result)
 {
     return my_agent::ToolExecOutput{
-        .turn_id = command.ref.turn_id,
-        .tool_exec_id = command.tool_exec_id,
-        .id = command.id,
+        .call = command.call,
         .ref = command.ref,
         .result = std::move(result),
     };
@@ -55,11 +99,9 @@ my_agent::ToolExecOutput execution_output(
 
 my_agent::PermissionApprove approve_pending(const my_agent::Model& model)
 {
-    const auto& pending = model.pending_permission.value();
+    const auto& pending = std::get<my_agent::AwaitingPermission>(model.phase);
     return my_agent::PermissionApprove{
-        .turn_id = pending.turn_id,
-        .tool_exec_id = pending.tool_exec_id,
-        .id = pending.id,
+        .call = pending.call,
     };
 }
 
@@ -67,13 +109,19 @@ my_agent::PermissionReject reject_pending(
     const my_agent::Model& model,
     std::optional<std::string> feedback = {})
 {
-    const auto& pending = model.pending_permission.value();
+    const auto& pending = std::get<my_agent::AwaitingPermission>(model.phase);
     return my_agent::PermissionReject{
-        .turn_id = pending.turn_id,
-        .tool_exec_id = pending.tool_exec_id,
-        .id = pending.id,
+        .call = pending.call,
         .feedback = std::move(feedback),
     };
+}
+
+std::string_view call_id(
+    const my_agent::Model& model, const my_agent::ToolCallRef& ref)
+{
+    const my_agent::ToolCall* call =
+        my_agent::resolve_tool_call(model.domain.thread, ref);
+    return call == nullptr ? std::string_view{} : std::string_view{call->id};
 }
 
 }  // namespace
@@ -107,10 +155,10 @@ TEST(ToolLoopTest, ExecutesCalculatorToolAndContinuesToFinalAnswer)
                 });
             }
 
-            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{.ref = kFirstStream}});
         };
 
-    my_agent::HeadlessRunner runner{
+    HeadlessRunner runner{
         std::move(fake_stream), headless_session_runtime()};
 
     const my_agent::Model& model = runner.dispatch(my_agent::Msg{
@@ -122,8 +170,9 @@ TEST(ToolLoopTest, ExecutesCalculatorToolAndContinuesToFinalAnswer)
     ASSERT_EQ(std::size_t{2}, received_requests.size());
 
     const my_agent::Request& initial_request = received_requests[0];
-    constexpr std::array<std::string_view, 6> expected_names{
-        "calculator", "read", "remember", "forget", "skill", "search_docs"};
+    constexpr std::array<std::string_view, 7> expected_names{
+        "calculator", "read", "list_dir", "remember", "forget", "skill",
+        "search_docs"};
     ASSERT_EQ(expected_names.size(), initial_request.tools.size());
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
         EXPECT_EQ(expected_names[i], initial_request.tools[i].name);
@@ -146,7 +195,7 @@ TEST(ToolLoopTest, ExecutesCalculatorToolAndContinuesToFinalAnswer)
     EXPECT_EQ("calculator", tool_message.tool_calls[0].name);
     EXPECT_EQ("42", tool_message.tool_calls[0].output());
 
-    const my_agent::Thread& thread = model.thread;
+    const my_agent::Thread& thread = model.domain.thread;
     ASSERT_EQ(std::size_t{3}, thread.messages.size());
     EXPECT_EQ(my_agent::Role::User, thread.messages[0].role);
     EXPECT_EQ("Calculate 6 * 7", thread.messages[0].text);
@@ -272,7 +321,7 @@ TEST(ToolLoopTest, StalePermissionDecisionsCannotAffectTheNextCall)
             "same-provider-id-2", "read",
             nlohmann::json{{"path", "second.txt"}}));
     const my_agent::Step awaiting_first = my_agent::update(
-        std::move(started.model), my_agent::Msg{my_agent::StreamFinished{}});
+        std::move(started.model), my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}});
     const auto first_ref = std::get<my_agent::AwaitingPermission>(
         awaiting_first.model.phase).call;
 
@@ -380,7 +429,7 @@ TEST(ToolLoopTest, CancellingAwaitingPermissionSettlesSiblingsWithoutHostCancel)
         resolved_core_tool_call(
             "cancel-call-2", "read", nlohmann::json{{"path", "second.txt"}}));
     const my_agent::Step awaiting = my_agent::update(
-        std::move(started.model), my_agent::Msg{my_agent::StreamFinished{}});
+        std::move(started.model), my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}});
     ASSERT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         awaiting.model.phase));
 
@@ -406,7 +455,6 @@ TEST(ToolLoopTest, CancellingAwaitingPermissionSettlesSiblingsWithoutHostCancel)
     const auto* prepare = std::get_if<my_agent::PrepareRequest>(
         &queued_cancel.cmd);
     ASSERT_NE(nullptr, prepare);
-    EXPECT_FALSE(prepare->supersedes.has_value());
     EXPECT_FALSE(std::holds_alternative<my_agent::CancelOperation>(
         queued_cancel.cmd));
 }
@@ -489,6 +537,7 @@ TEST(ToolLoopTest, RunToolCarriesTheSessionRuntimeResolvedCalculatorRef)
     const my_agent::Step call_received = my_agent::update(
         std::move(prepared.model),
         my_agent::Msg{my_agent::ResolvedStreamToolCall{
+            kFirstStream,
             "calculator-ref-call",
             "calculator",
             nlohmann::json{
@@ -500,7 +549,7 @@ TEST(ToolLoopTest, RunToolCarriesTheSessionRuntimeResolvedCalculatorRef)
         }});
     const my_agent::Step execution_started = my_agent::update(
         call_received.model,
-        my_agent::Msg{my_agent::StreamFinished{}});
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}});
     const auto* run_tool = std::get_if<my_agent::RunTool>(&execution_started.cmd);
 
     ASSERT_NE(nullptr, run_tool);
@@ -525,15 +574,17 @@ resolved_core_tool_call("calculator-call-1", "calculator", nlohmann::json{
         std::move(first.model),
         my_agent::Msg{my_agent::Submit{.text = "follow-up"}}
     );
+    const my_agent::Streaming source_stream =
+        std::get<my_agent::Streaming>(first.model.phase);
 
     const my_agent::Step tool_started = my_agent::update(
         std::move(first.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
     const auto* run_tool = std::get_if<my_agent::RunTool>(&tool_started.cmd);
     ASSERT_NE(nullptr, run_tool);
-    ASSERT_EQ(std::size_t{1}, tool_started.model.queued_messages.size());
-    EXPECT_EQ("follow-up", tool_started.model.queued_messages.front().text);
+    ASSERT_EQ(std::size_t{1}, tool_started.model.session.queued_messages.size());
+    EXPECT_EQ("follow-up", tool_started.model.session.queued_messages.front().text);
 
     const my_agent::Step continuation = my_agent_test::prepare_request(
         my_agent::update(
@@ -550,21 +601,23 @@ resolved_core_tool_call("calculator-call-1", "calculator", nlohmann::json{
         continuation.model.domain.thread.messages.back().turn_id);
     EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(
         continuation.model.phase));
-    ASSERT_EQ(std::size_t{1}, continuation.model.queued_messages.size());
-    ASSERT_EQ(std::size_t{3}, continuation.model.thread.messages.size());
+    ASSERT_EQ(std::size_t{1}, continuation.model.session.queued_messages.size());
+    ASSERT_EQ(std::size_t{3}, continuation.model.domain.thread.messages.size());
+    const my_agent::StreamRef continuation_ref =
+        std::get<my_agent::Streaming>(continuation.model.phase).ref;
 
     const my_agent::Step next_turn = my_agent_test::prepare_request(
         my_agent::update(
         continuation.model,
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = continuation_ref}}
     ));
     const auto* next_command = std::get_if<my_agent::StartStream>(
         &next_turn.cmd);
     ASSERT_NE(nullptr, next_command);
     EXPECT_EQ("follow-up", next_command->request.messages.back().text);
-    EXPECT_TRUE(next_turn.model.queued_messages.empty());
-    ASSERT_EQ(std::size_t{5}, next_turn.model.thread.messages.size());
-    EXPECT_EQ("follow-up", next_turn.model.thread.messages[3].text);
+    EXPECT_TRUE(next_turn.model.session.queued_messages.empty());
+    ASSERT_EQ(std::size_t{5}, next_turn.model.domain.thread.messages.size());
+    EXPECT_EQ("follow-up", next_turn.model.domain.thread.messages[3].text);
 }
 
 TEST(ToolLoopTest, PermissionPauseAlsoKeepsQueuedTurnsWaiting)
@@ -590,19 +643,11 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "test.txt
 
     const my_agent::Step permission = my_agent::update(
         std::move(step.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
     EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         permission.model.phase));
-    ASSERT_EQ(std::size_t{1}, permission.model.queued_messages.size());
-
-    const my_agent::Step id_only = my_agent::update(
-        awaiting_permission.model,
-        my_agent::Msg{my_agent::PermissionApprove{.id = "read-call-1"}}
-    );
-    EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
-        id_only.model.phase));
-    EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(id_only.cmd));
+    ASSERT_EQ(std::size_t{1}, permission.model.session.queued_messages.size());
 
     const my_agent::Step approved = my_agent::update(
         permission.model,
@@ -610,7 +655,7 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "test.txt
     );
     const auto* approved_run = std::get_if<my_agent::RunTool>(&approved.cmd);
     ASSERT_NE(nullptr, approved_run);
-    ASSERT_EQ(std::size_t{1}, approved.model.queued_messages.size());
+    ASSERT_EQ(std::size_t{1}, approved.model.session.queued_messages.size());
 
     const my_agent::Step continued = my_agent_test::prepare_request(
         my_agent::update(
@@ -621,17 +666,19 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "test.txt
     ));
     EXPECT_TRUE(std::holds_alternative<my_agent::StartStream>(
         continued.cmd));
-    ASSERT_EQ(std::size_t{1}, continued.model.queued_messages.size());
+    ASSERT_EQ(std::size_t{1}, continued.model.session.queued_messages.size());
+    const my_agent::StreamRef continuation_ref =
+        std::get<my_agent::Streaming>(continued.model.phase).ref;
 
     const my_agent::Step next = my_agent_test::prepare_request(
         my_agent::update(
         continued.model,
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = continuation_ref}}
     ));
     const auto* next_command = std::get_if<my_agent::StartStream>(&next.cmd);
     ASSERT_NE(nullptr, next_command);
     EXPECT_EQ("after permission", next_command->request.messages.back().text);
-    EXPECT_TRUE(next.model.queued_messages.empty());
+    EXPECT_TRUE(next.model.session.queued_messages.empty());
 }
 
 // M3 的同步调度契约：Core 每次只交付一个 RunTool。
@@ -667,7 +714,7 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 
     const my_agent::Step stream_finished = my_agent::update(
         second_call_received.model,
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     // 这里之后真实运行可能不满足，因为存在并发
@@ -675,7 +722,8 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &stream_finished.cmd
     );
     ASSERT_NE(nullptr, run_first);
-    EXPECT_EQ("calculator-call-1", run_first->id);
+    EXPECT_EQ("calculator-call-1",
+        call_id(stream_finished.model, run_first->call));
 
     const my_agent::Step first_call_completed = my_agent::update(
         stream_finished.model,
@@ -690,7 +738,8 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &first_call_completed.cmd
     );
     ASSERT_NE(nullptr, run_second);
-    EXPECT_EQ("calculator-call-2", run_second->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(first_call_completed.model, run_second->call));
 
     const my_agent::Step second_call_completed = my_agent_test::prepare_request(
         my_agent::update(
@@ -747,19 +796,21 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 
     my_agent::Step first_call_started = my_agent::update(
         std::move(second_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     const auto* first_execution = std::get_if<my_agent::ExecutingTool>(
         &first_call_started.model.phase
     );
     ASSERT_NE(nullptr, first_execution);
-    EXPECT_EQ("calculator-call-1", first_execution->id);
+    EXPECT_EQ("calculator-call-1",
+        call_id(first_call_started.model, first_execution->call));
 
     const auto* run_first =
         std::get_if<my_agent::RunTool>(&first_call_started.cmd);
     ASSERT_NE(nullptr, run_first);
-    EXPECT_EQ("calculator-call-1", run_first->id);
+    EXPECT_EQ("calculator-call-1",
+        call_id(first_call_started.model, run_first->call));
 
     const my_agent::Step second_call_started = my_agent::update(
         std::move(first_call_started.model),
@@ -774,12 +825,14 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &second_call_started.model.phase
     );
     ASSERT_NE(nullptr, second_execution);
-    EXPECT_EQ("calculator-call-2", second_execution->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(second_call_started.model, second_execution->call));
 
     const auto* run_second =
         std::get_if<my_agent::RunTool>(&second_call_started.cmd);
     ASSERT_NE(nullptr, run_second);
-    EXPECT_EQ("calculator-call-2", run_second->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(second_call_started.model, run_second->call));
 }
 
 TEST(ToolLoopTest, ContinuesWithLaterToolAfterEarlierToolFails)
@@ -823,10 +876,10 @@ TEST(ToolLoopTest, ContinuesWithLaterToolAfterEarlierToolFails)
                 });
             }
 
-            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{.ref = kFirstStream}});
         };
 
-    my_agent::HeadlessRunner runner{
+    HeadlessRunner runner{
         std::move(fake_stream), headless_session_runtime()};
 
     const my_agent::Model& model = runner.dispatch(my_agent::Msg{
@@ -860,10 +913,10 @@ TEST(ToolLoopTest, ContinuesWithLaterToolAfterEarlierToolFails)
     ));
     EXPECT_EQ("40", successful_call.output());
 
-    ASSERT_EQ(std::size_t{3}, model.thread.messages.size());
+    ASSERT_EQ(std::size_t{3}, model.domain.thread.messages.size());
     EXPECT_EQ(
         "The first calculation failed; the second result is 40.",
-        model.thread.messages[2].text
+        model.domain.thread.messages[2].text
     );
 }
 
@@ -908,10 +961,10 @@ TEST(ToolLoopTest, ContinuesStreamingWhenFinalToolInBatchFails)
                 });
             }
 
-            sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
+            sink(my_agent::ProviderEvent{my_agent::StreamFinished{.ref = kFirstStream}});
         };
 
-    my_agent::HeadlessRunner runner{
+    HeadlessRunner runner{
         std::move(fake_stream), headless_session_runtime()};
 
     const my_agent::Model& model = runner.dispatch(my_agent::Msg{
@@ -945,17 +998,17 @@ TEST(ToolLoopTest, ContinuesStreamingWhenFinalToolInBatchFails)
         failed_call.output()
     );
 
-    ASSERT_EQ(std::size_t{3}, model.thread.messages.size());
+    ASSERT_EQ(std::size_t{3}, model.domain.thread.messages.size());
     EXPECT_EQ(
         "The first result is 42; the second calculation failed.",
-        model.thread.messages[2].text
+        model.domain.thread.messages[2].text
     );
 }
 
 TEST(ToolLoopTest, MinimalProfilePausesReadToolForPermissionAfterStreamFinishes)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -972,16 +1025,17 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 
     const my_agent::Step stream_finished = my_agent::update(
         std::move(tool_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         stream_finished.model.phase
     ));
-    ASSERT_TRUE(stream_finished.model.pending_permission.has_value());
     EXPECT_EQ(
         "read-call-1",
-        stream_finished.model.pending_permission->id
+        call_id(stream_finished.model,
+            std::get<my_agent::AwaitingPermission>(
+                stream_finished.model.phase).call)
     );
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(
         stream_finished.cmd
@@ -991,7 +1045,7 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 TEST(ToolLoopTest, MatchingPermissionApprovalRunsToolAndEntersExecutingPhase)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1008,7 +1062,7 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 
     my_agent::Step awaiting_permission = my_agent::update(
         std::move(tool_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     const my_agent::Step approved = my_agent::update(
@@ -1021,18 +1075,19 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
     EXPECT_TRUE(std::holds_alternative<my_agent::ExecutingTool>(
         approved.model.phase
     ));
-    EXPECT_FALSE(approved.model.pending_permission.has_value());
+    EXPECT_FALSE(std::holds_alternative<my_agent::AwaitingPermission>(
+        approved.model.phase));
 
     const auto* run_tool = std::get_if<my_agent::RunTool>(&approved.cmd);
     ASSERT_NE(nullptr, run_tool);
-    EXPECT_EQ("read-call-1", run_tool->id);
+    EXPECT_EQ("read-call-1", call_id(approved.model, run_tool->call));
     EXPECT_EQ(std::uint64_t{2}, run_tool->ref.value);
 }
 
 TEST(ToolLoopTest, PermissionPauseResumesMixedToolBatchInEmissionOrder)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1058,16 +1113,17 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 
     my_agent::Step awaiting_read_permission = my_agent::update(
         std::move(calculator_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         awaiting_read_permission.model.phase
     ));
-    ASSERT_TRUE(awaiting_read_permission.model.pending_permission.has_value());
     EXPECT_EQ(
         "read-call-1",
-        awaiting_read_permission.model.pending_permission->id
+        call_id(awaiting_read_permission.model,
+            std::get<my_agent::AwaitingPermission>(
+                awaiting_read_permission.model.phase).call)
     );
 
     my_agent::Step read_started = my_agent::update(
@@ -1081,11 +1137,11 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &read_started.model.phase
     );
     ASSERT_NE(nullptr, read_execution);
-    EXPECT_EQ("read-call-1", read_execution->id);
+    EXPECT_EQ("read-call-1", call_id(read_started.model, read_execution->call));
 
     const auto* run_read = std::get_if<my_agent::RunTool>(&read_started.cmd);
     ASSERT_NE(nullptr, run_read);
-    EXPECT_EQ("read-call-1", run_read->id);
+    EXPECT_EQ("read-call-1", call_id(read_started.model, run_read->call));
 
     my_agent::Step calculator_started = my_agent::update(
         std::move(read_started.model),
@@ -1100,12 +1156,14 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &calculator_started.model.phase
     );
     ASSERT_NE(nullptr, calculator_execution);
-    EXPECT_EQ("calculator-call-2", calculator_execution->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(calculator_started.model, calculator_execution->call));
 
     const auto* run_calculator =
         std::get_if<my_agent::RunTool>(&calculator_started.cmd);
     ASSERT_NE(nullptr, run_calculator);
-    EXPECT_EQ("calculator-call-2", run_calculator->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(calculator_started.model, run_calculator->call));
 
     const my_agent::Step batch_completed = my_agent_test::prepare_request(
         my_agent::update(
@@ -1148,7 +1206,7 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 TEST(ToolLoopTest, ApprovedToolFailureContinuesWithLaterToolInBatch)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1174,7 +1232,7 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 
     my_agent::Step awaiting_permission = my_agent::update(
         std::move(calculator_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     my_agent::Step read_started = my_agent::update(
@@ -1202,12 +1260,14 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
         &calculator_started.model.phase
     );
     ASSERT_NE(nullptr, calculator_execution);
-    EXPECT_EQ("calculator-call-2", calculator_execution->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(calculator_started.model, calculator_execution->call));
 
     const auto* run_calculator =
         std::get_if<my_agent::RunTool>(&calculator_started.cmd);
     ASSERT_NE(nullptr, run_calculator);
-    EXPECT_EQ("calculator-call-2", run_calculator->id);
+    EXPECT_EQ("calculator-call-2",
+        call_id(calculator_started.model, run_calculator->call));
 
     const my_agent::Step batch_completed = my_agent_test::prepare_request(
         my_agent::update(
@@ -1250,7 +1310,7 @@ resolved_core_tool_call("calculator-call-2", "calculator", nlohmann::json{
 TEST(ToolLoopTest, ProfileChangeKeepsCurrentPermissionAndAppliesToLaterTool)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1274,13 +1334,14 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
 
     my_agent::Step awaiting_first_permission = my_agent::update(
         std::move(second_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
-    ASSERT_TRUE(awaiting_first_permission.model.pending_permission.has_value());
     EXPECT_EQ(
         "read-call-1",
-        awaiting_first_permission.model.pending_permission->id
+        call_id(awaiting_first_permission.model,
+            std::get<my_agent::AwaitingPermission>(
+                awaiting_first_permission.model.phase).call)
     );
 
     my_agent::Step profile_changed = my_agent::update(
@@ -1290,12 +1351,14 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
         }
     );
 
-    EXPECT_EQ(my_agent::Profile::Write, profile_changed.model.profile);
+    EXPECT_EQ(my_agent::Profile::Write, profile_changed.model.domain.profile);
     EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         profile_changed.model.phase
     ));
-    ASSERT_TRUE(profile_changed.model.pending_permission.has_value());
-    EXPECT_EQ("read-call-1", profile_changed.model.pending_permission->id);
+    EXPECT_EQ("read-call-1",
+        call_id(profile_changed.model,
+            std::get<my_agent::AwaitingPermission>(
+                profile_changed.model.phase).call));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(
         profile_changed.cmd
     ));
@@ -1311,12 +1374,14 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
         &first_call_started.model.phase
     );
     ASSERT_NE(nullptr, first_execution);
-    EXPECT_EQ("read-call-1", first_execution->id);
+    EXPECT_EQ("read-call-1",
+        call_id(first_call_started.model, first_execution->call));
 
     const auto* run_first =
         std::get_if<my_agent::RunTool>(&first_call_started.cmd);
     ASSERT_NE(nullptr, run_first);
-    EXPECT_EQ("read-call-1", run_first->id);
+    EXPECT_EQ("read-call-1",
+        call_id(first_call_started.model, run_first->call));
 
     const my_agent::Step second_call_started = my_agent::update(
         std::move(first_call_started.model),
@@ -1327,24 +1392,27 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
         }
     );
 
-    EXPECT_FALSE(second_call_started.model.pending_permission.has_value());
+    EXPECT_FALSE(std::holds_alternative<my_agent::AwaitingPermission>(
+        second_call_started.model.phase));
 
     const auto* second_execution = std::get_if<my_agent::ExecutingTool>(
         &second_call_started.model.phase
     );
     ASSERT_NE(nullptr, second_execution);
-    EXPECT_EQ("read-call-2", second_execution->id);
+    EXPECT_EQ("read-call-2",
+        call_id(second_call_started.model, second_execution->call));
 
     const auto* run_second =
         std::get_if<my_agent::RunTool>(&second_call_started.cmd);
     ASSERT_NE(nullptr, run_second);
-    EXPECT_EQ("read-call-2", run_second->id);
+    EXPECT_EQ("read-call-2",
+        call_id(second_call_started.model, run_second->call));
 }
 
 TEST(ToolLoopTest, LateStreamFinishedDoesNotRedispatchApprovedTool)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1361,7 +1429,7 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 
     my_agent::Step awaiting_permission = my_agent::update(
         std::move(tool_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     my_agent::Step approved = my_agent::update(
@@ -1373,13 +1441,14 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 
     const my_agent::Step late_stream_finished = my_agent::update(
         std::move(approved.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     EXPECT_TRUE(std::holds_alternative<my_agent::ExecutingTool>(
         late_stream_finished.model.phase
     ));
-    EXPECT_FALSE(late_stream_finished.model.pending_permission.has_value());
+    EXPECT_FALSE(std::holds_alternative<my_agent::AwaitingPermission>(
+        late_stream_finished.model.phase));
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(
         late_stream_finished.cmd
     ));
@@ -1388,7 +1457,7 @@ resolved_core_tool_call("read-call-1", "read", nlohmann::json{{"path", "CMakeLis
 TEST(ToolLoopTest, RejectingFirstAwaitingCallAdvancesToNextPermission)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1412,7 +1481,7 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
 
     my_agent::Step awaiting_permission = my_agent::update(
         std::move(second_tool_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     const my_agent::Step rejected = my_agent::update(
@@ -1426,15 +1495,15 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
     EXPECT_TRUE(std::holds_alternative<my_agent::AwaitingPermission>(
         rejected.model.phase
     ));
-    ASSERT_TRUE(rejected.model.pending_permission.has_value());
     EXPECT_EQ(
         "read-call-2",
-        rejected.model.pending_permission->id
+        call_id(rejected.model,
+            std::get<my_agent::AwaitingPermission>(rejected.model.phase).call)
     );
     EXPECT_TRUE(std::holds_alternative<my_agent::NoCommand>(rejected.cmd));
 
     const my_agent::Message& tool_message =
-        rejected.model.thread.messages.back();
+        rejected.model.domain.thread.messages.back();
     ASSERT_EQ(std::size_t{2}, tool_message.tool_calls.size());
 
     const my_agent::ToolCall& rejected_call = tool_message.tool_calls[0];
@@ -1456,7 +1525,7 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
 TEST(ToolLoopTest, RejectingFinalPermissionContinuesWithCompleteBatchResults)
 {
     my_agent::Model model{};
-    model.profile = my_agent::Profile::Minimal;
+    model.domain.profile = my_agent::Profile::Minimal;
 
     my_agent::Step submitted = my_agent_test::prepare_request(
         my_agent::update(
@@ -1480,7 +1549,7 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
 
     my_agent::Step awaiting_first_permission = my_agent::update(
         std::move(second_call_received.model),
-        my_agent::Msg{my_agent::StreamFinished{}}
+        my_agent::Msg{my_agent::StreamFinished{.ref = kFirstStream}}
     );
 
     my_agent::Step awaiting_second_permission = my_agent::update(
@@ -1502,7 +1571,8 @@ resolved_core_tool_call("read-call-2", "read", nlohmann::json{
     EXPECT_TRUE(std::holds_alternative<my_agent::Streaming>(
         rejected_final.model.phase
     ));
-    EXPECT_FALSE(rejected_final.model.pending_permission.has_value());
+    EXPECT_FALSE(std::holds_alternative<my_agent::AwaitingPermission>(
+        rejected_final.model.phase));
 
     const auto* start_stream =
         std::get_if<my_agent::StartStream>(&rejected_final.cmd);

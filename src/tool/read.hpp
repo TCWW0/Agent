@@ -18,7 +18,8 @@ namespace my_agent::tool::detail {
 [[nodiscard]]
 RegisteredTool make_read_tool(
     std::filesystem::path workspace_root,
-    std::vector<std::filesystem::path> allowed_roots = {}
+    std::vector<std::filesystem::path> allowed_roots = {},
+    bool allow_temporary_root = true
 );
 
 [[nodiscard]] RegisteredTool make_read_tool(std::shared_ptr<ReadRoots> roots);

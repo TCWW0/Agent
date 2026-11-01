@@ -101,16 +101,12 @@ TEST(SystemPromptTest, InstructsTheModelToCallRememberRatherThanAcknowledgeInPro
     EXPECT_NE(std::string::npos, prompt.find("remember tool"));
 }
 
-// 场景：采集真实环境。
-// 领域语义：这是提示构建里唯一碰 IO 的部分，与纯粹的 build() 分开正是为了让
-// 上面那些断言不需要文件系统。
-TEST(SystemPromptTest, CaptureEnvironmentFillsWorkingDirectoryAndOs)
+// 场景：采集进程级操作系统事实。
+// working_directory 属于会话边界，由 SessionServices 提供；prompt 层只负责
+// 不随会话变化的宿主操作系统。
+TEST(SystemPromptTest, HostOperatingSystemIsAvailable)
 {
-    const my_agent::prompt::Context context =
-        my_agent::prompt::capture_environment();
-
-    EXPECT_FALSE(context.working_directory.empty());
-    EXPECT_FALSE(context.operating_system.empty());
+    EXPECT_FALSE(my_agent::prompt::host_operating_system().empty());
 }
 
 }  // namespace

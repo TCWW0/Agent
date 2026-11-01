@@ -11,9 +11,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <string_view>
-#include <unordered_map>
 
 namespace my_agent {
 
@@ -24,8 +23,7 @@ using SystemPromptProvider = std::function<std::string()>;
 class AsyncHost{
 public:
     AsyncHost(StreamEffect stream,
-              std::shared_ptr<const tool::ToolRuntime> runtime,
-              ToolExecEffect execute_tool = {});
+              std::shared_ptr<const tool::ToolRuntime> runtime);
     ~AsyncHost();
 
     // Owner-thread only，通常在开跑前设置一次。update() 是纯的、不能读文件，
@@ -79,10 +77,13 @@ private:
     void execute_cmd(CancelOperation cmd);
 
     struct OperationState;
+    struct CurrentOperation {
+        OperationRef ref;
+        std::shared_ptr<OperationState> state;
+    };
     [[nodiscard]]
-    std::shared_ptr<OperationState> begin_operation(OperationId operation);
-    void cancel_operation(OperationId operation) noexcept;
-    void retire_operation(OperationId operation) noexcept;
+    std::shared_ptr<OperationState> begin_operation(OperationRef ref);
+    void invalidate_current_operation() noexcept;
 
     [[nodiscard]]
     bool is_quiescent() const noexcept;
@@ -99,9 +100,9 @@ private:
     std::shared_ptr<WakeSignal> wake_;
     std::shared_ptr<InboxState> inbox_;
 
-    std::mutex operations_mutex_;
-    std::unordered_map<OperationId,
-        std::shared_ptr<OperationState>, OperationIdHash> operations_;
+    // Owner-thread-only logical cancellation slot. Workers retain only the
+    // shared OperationState and therefore never access host-owned state.
+    std::optional<CurrentOperation> current_operation_;
 
     // Provider 流走共享池，工具执行走隔离通道。声明顺序即销毁顺序的逆序：
     // pool_ 最先析构（join 掉 worker），此时 inbox_/wake_ 仍然有效。

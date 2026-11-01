@@ -9,6 +9,8 @@ set(_roots
 )
 set(_extensions .h .hh .hpp .c .cc .cpp .cxx)
 set(_violations)
+set(_animation_host_adapter
+    "${PROJECT_SOURCE_DIR}/include/my_agent/ui/maya_animation.hpp")
 
 foreach(_root IN LISTS _roots)
     file(GLOB_RECURSE _files
@@ -26,11 +28,16 @@ foreach(_root IN LISTS _roots)
         string(FIND "${_contents}" "#include <maya/maya.hpp>" _umbrella)
         string(FIND "${_contents}" "#include \"maya/maya.hpp\"" _quoted_umbrella)
         string(REGEX MATCH "maya::run[ \t]*\\(" _maya_run "${_contents}")
+        set(_direct_app_violation false)
+        if(_direct_app_include
+           AND NOT _file STREQUAL _animation_host_adapter)
+            set(_direct_app_violation true)
+        endif()
 
-        if(_direct_app_include OR _umbrella GREATER_EQUAL 0
+        if(_direct_app_violation OR _umbrella GREATER_EQUAL 0
            OR _quoted_umbrella GREATER_EQUAL 0 OR _maya_run)
             set(_reason)
-            if(_direct_app_include)
+            if(_direct_app_violation)
                 set(_reason "direct maya/app include")
             elseif(_umbrella GREATER_EQUAL 0 OR _quoted_umbrella GREATER_EQUAL 0)
                 set(_reason "maya umbrella include")
