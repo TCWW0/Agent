@@ -90,6 +90,16 @@ TEST(VirtualTerminalTest, WideCharactersOccupyTwoCells)
     EXPECT_TRUE(terminal.unhandled().empty());
 }
 
+TEST(VirtualTerminalTest, AssistantGlyphOccupiesOneCell)
+{
+    VirtualTerminal terminal{4, 1};
+    terminal.feed("\x1b[1;1H✦X");
+
+    EXPECT_EQ("✦", terminal.cell_text(0, 0));
+    EXPECT_EQ("X", terminal.cell_text(0, 1));
+    EXPECT_TRUE(terminal.unhandled().empty());
+}
+
 // 场景：SGR 改变后续格子的样式，reset 只影响 reset 之后画的格子。
 // 领域语义：caret seam 通过 cell_style 判断「一格被画成什么样」，所以量具必须
 // 证明它既不会漏掉样式，也不会在 reset 后把旧样式串到下一格。期望值直接来自

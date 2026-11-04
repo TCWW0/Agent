@@ -79,6 +79,63 @@ TEST(ScreenTest, SeparatesTranscriptContentFromDockChrome)
     EXPECT_EQ(std::string::npos, screen.dock.composer.text.find("hello"));
 }
 
+TEST(ScreenTest, GivesUserAndAssistantTurnsDistinctConversationIdentities)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::User, .text = "hello"},
+        {.role = my_agent::Role::Assistant, .text = "hello back"},
+    });
+    my_agent::ui::UiState ui;
+    ui.status.model_name = "qwen3.5:latest";
+
+    const my_agent::ui::ScreenConfig screen =
+        my_agent::ui::project_screen(model, ui, maya::Theme{});
+
+    ASSERT_EQ(2u, screen.transcript.turns.size());
+    EXPECT_EQ("❯", screen.transcript.turns[0].glyph);
+    EXPECT_EQ("You", screen.transcript.turns[0].label);
+    EXPECT_EQ("✦", screen.transcript.turns[1].glyph);
+    EXPECT_EQ("qwen3.5:latest", screen.transcript.turns[1].label);
+}
+
+TEST(ScreenTest, UsesTheRequestModelWhenNoUiModelNameIsAvailable)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant, .text = "hello"},
+    });
+    model.domain.request_policy =
+        my_agent::RequestPolicy{{}, "ollama", "qwen2.5:7b"};
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    ASSERT_EQ(1u, screen.transcript.turns.size());
+    EXPECT_EQ("qwen2.5:7b", screen.transcript.turns.front().label);
+}
+
+TEST(ScreenTest, GivesUserAndAssistantTextRoleSpecificBodySemantics)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::User, .text = "# literal prompt"},
+        {.role = my_agent::Role::Assistant,
+         .text = "## Answer",
+         .tool_calls = {{.id = "call-1", .name = "read"}}},
+    });
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    ASSERT_EQ(2u, screen.transcript.turns.size());
+    ASSERT_EQ(1u, screen.transcript.turns[0].body.size());
+    EXPECT_TRUE(std::holds_alternative<maya::Turn::PlainText>(
+        screen.transcript.turns[0].body[0]));
+    ASSERT_EQ(2u, screen.transcript.turns[1].body.size());
+    EXPECT_TRUE(std::holds_alternative<maya::Turn::MarkdownText>(
+        screen.transcript.turns[1].body[0]));
+    EXPECT_TRUE(std::holds_alternative<maya::Turn::PlainText>(
+        screen.transcript.turns[1].body[1]));
+}
+
 TEST(ScreenTest, PermissionCardUsesThePendingCallBinding)
 {
     my_agent::Model model;

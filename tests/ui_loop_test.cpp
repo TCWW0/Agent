@@ -517,8 +517,8 @@ TEST(UiLoopTest, DeclinesToRunWithoutATtySoTheCallerCanFallBack)
 // issue #26 红 4：真实事件循环绘制语义 Screen。
 // 一条 tracer bullet 同时穿过 run_ui → project_screen → Painter → pty：
 // 初始帧先看到新 Composer 的占位文案；提交后再看到 Conversation 的 speaker chrome
-// 和助手正文。旧路径虽然也能吐出消息文本，却没有 "type a message"、"you"、
-// "agent" 这些 Maya widget 拥有的语义外观，因此不能靠正文碰巧出现蒙混过关。
+// 和助手正文。旧路径虽然也能吐出消息文本，却没有 "type a message"、"❯ You"、
+// "✦ Assistant" 这些 Maya widget 拥有的语义外观，因此不能靠正文碰巧出现蒙混过关。
 TEST(UiLoopTest, RunsTheSemanticTranscriptAndDockOnARealTerminal)
 {
     constexpr std::string_view kUser = "RUNTIME_SCREEN_USER_7F3A";
@@ -587,8 +587,10 @@ TEST(UiLoopTest, RunsTheSemanticTranscriptAndDockOnARealTerminal)
     EXPECT_TRUE(read_until(kAssistant))
         << "assistant reply did not pass through the semantic transcript";
     EXPECT_NE(std::string::npos, seen.find(kUser));
-    EXPECT_NE(std::string::npos, seen.find("you"));
-    EXPECT_NE(std::string::npos, seen.find("agent"));
+    EXPECT_NE(std::string::npos, seen.find("❯"));
+    EXPECT_NE(std::string::npos, seen.find("You"));
+    EXPECT_NE(std::string::npos, seen.find("✦"));
+    EXPECT_NE(std::string::npos, seen.find("Assistant"));
 
     stop();
 }
@@ -995,7 +997,7 @@ TEST(UiLoopTest, ShowsUnseenTranscriptOutputWithoutMovingAFrozenViewport)
 
     std::string transcript;
     for (int index = 0; index < 90; ++index) {
-        transcript += "S3_ROW_" + std::to_string(index) + "\n";
+        transcript += "S3_ROW_" + std::to_string(index) + "\n\n";
     }
     std::atomic<bool> release_tail{false};
     TestHost host{
@@ -1060,12 +1062,9 @@ TEST(UiLoopTest, ShowsUnseenTranscriptOutputWithoutMovingAFrozenViewport)
               ::write(primary, typed.data(), typed.size()));
     ASSERT_TRUE(read_until("S3_ROW_89"));
 
-    std::string page_ups;
-    for (int count = 0; count < 40; ++count) {
-        page_ups += "\x1b[5~";
-    }
-    ASSERT_EQ(static_cast<ssize_t>(page_ups.size()),
-              ::write(primary, page_ups.data(), page_ups.size()));
+    const std::string to_top = "\x1b[1;5H";
+    ASSERT_EQ(static_cast<ssize_t>(to_top.size()),
+              ::write(primary, to_top.data(), to_top.size()));
     const auto top_deadline = std::chrono::steady_clock::now()
         + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < top_deadline
@@ -1073,7 +1072,13 @@ TEST(UiLoopTest, ShowsUnseenTranscriptOutputWithoutMovingAFrozenViewport)
         read_chunk();
     }
     const std::string frozen = screen();
-    ASSERT_NE(std::string::npos, frozen.find("S3_ROW_0"));
+    if (frozen.find("S3_ROW_0") == std::string::npos) {
+        ADD_FAILURE() << "Ctrl+Home did not reach the transcript head\n"
+                      << frozen;
+        release_tail.store(true, std::memory_order_release);
+        stop();
+        return;
+    }
     EXPECT_NE(std::string::npos, frozen.find("Ctrl+End"));
     EXPECT_EQ(std::string::npos, frozen.find("new output"));
 
@@ -1533,9 +1538,11 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
         GTEST_SKIP() << "openpty unavailable in this environment";
     }
 
-    // 40 个 A：80 列时一行放得下，20 列时必须折成多行。宽度是否被重新读取，
-    // 看的就是屏幕上一行到底有多少个 A。
-    const std::string wide_text(40, 'A');
+    // 40 个 Z：80 列时一行放得下，20 列时必须折成多行。宽度是否被重新读取，
+    // 看的就是屏幕上一行到底有多少个 Z。使用不会出现在 turn header 中的字符，
+    // 避免把 Assistant 等 UI chrome 误算成正文。
+    constexpr char kPayload = 'Z';
+    const std::string wide_text(40, kPayload);
     TestHost host{[wide_text](my_agent::Request, my_agent::ProviderEventSink sink) {
         sink(my_agent::ProviderEvent{my_agent::StreamTextDelta{.text = wide_text}});
         sink(my_agent::ProviderEvent{my_agent::StreamFinished{}});
@@ -1591,7 +1598,8 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < deadline
-           && static_cast<std::size_t>(std::count(after.begin(), after.end(), 'A'))
+           && static_cast<std::size_t>(std::count(
+                  after.begin(), after.end(), kPayload))
                < wide_text.size()) {
         pollfd probe{.fd = primary, .events = POLLIN, .revents = 0};
         if (::poll(&probe, 1, 200) > 0) {
@@ -1605,7 +1613,8 @@ TEST(UiLoopTest, ReflowsOnTerminalResizeWithoutWaitingForAKeypress)
 
     EXPECT_EQ(
         wide_text.size(),
-        static_cast<std::size_t>(std::count(after.begin(), after.end(), 'A'))
+        static_cast<std::size_t>(std::count(
+            after.begin(), after.end(), kPayload))
     ) << "变窄后必须完整重排全部内容，而不是横向裁掉或等待下一次按键";
     EXPECT_EQ(std::string::npos, after.find(wide_text))
         << "旧宽度的整行不该再出现在重排后的帧里";

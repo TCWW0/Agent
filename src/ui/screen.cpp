@@ -265,24 +265,14 @@ std::vector<maya::Element> turn_body_elements(
     return rows;
 }
 
-// D3's Turn widget lets its header component consume the body's allocation
+// D3's Turn widget lets its header/rail container consume the body's allocation
 // when embedded in this project's independently-scrolled transcript. Keep the
-// renderer dependency, but own the small host composition seam so message
-// bodies remain observable without patching Maya.
+// renderer dependency, but own a quieter host composition: a colored speaker
+// header and a borderless two-column body indent. This preserves multi-row
+// Markdown without a hanging rail or a project-specific Maya patch.
 maya::Element turn_element(const maya::Turn::Config& config)
 {
     using namespace maya::dsl;
-
-    const maya::Style rail_style = maya::Style{}.with_fg(config.rail_color);
-    const auto rail_row = [&rail_style](maya::Element content) {
-        return h(
-            text("\xe2\x94\x83", rail_style),
-            text("  "),
-            std::move(content) | grow(1.0f)).build();
-    };
-    const auto empty_rail_row = [&rail_style] {
-        return h(text("\xe2\x94\x83", rail_style)).build();
-    };
 
     std::vector<maya::Element> rows;
     if (!config.continuation) {
@@ -305,27 +295,31 @@ maya::Element turn_element(const maya::Turn::Config& config)
                     .with_dim()).build());
         }
         header_parts.push_back(text(" ").build());
-        rows.push_back(rail_row(h(std::move(header_parts)).build()));
-        rows.push_back(empty_rail_row());
+        rows.push_back(h(std::move(header_parts)).build());
+        rows.push_back(blank().build());
     }
 
     std::vector<maya::Element> body = turn_body_elements(config);
-    for (maya::Element& row : body) {
-        rows.push_back(empty_text_element(row)
-            ? empty_rail_row()
-            : rail_row(std::move(row)));
+    if (!body.empty()) {
+        rows.push_back(maya::detail::box()
+            .direction(maya::FlexDirection::Column)
+            .padding(0, 0, 0, 2)
+            (v(std::move(body)).build()));
     }
     if (!config.error.empty()) {
-        rows.push_back(empty_rail_row());
-        rows.push_back(rail_row(h(
-            text("\xe2\x9a\xa0  ",
-                 maya::Style{}.with_fg(maya::Color::red()).with_bold()),
-            text(config.error,
-                 maya::Style{}.with_fg(maya::Color::red())
-                     .with_dim().with_italic())).build()));
+        rows.push_back(blank().build());
+        rows.push_back(maya::detail::box()
+            .direction(maya::FlexDirection::Column)
+            .padding(0, 0, 0, 2)
+            (h(
+                text("\xe2\x9a\xa0  ",
+                     maya::Style{}.with_fg(maya::Color::red()).with_bold()),
+                text(config.error,
+                     maya::Style{}.with_fg(maya::Color::red())
+                         .with_dim().with_italic())).build()));
     }
 
-    maya::Element turn = v(std::move(rows)).build();
+    maya::Element turn = (v(std::move(rows)) | grow(1.0f)).build();
 
     if (!config.checkpoint_above) {
         return turn;
@@ -336,6 +330,25 @@ maya::Element turn_element(const maya::Turn::Config& config)
             .color = config.checkpoint_color,
         }}.build(),
         std::move(turn)).build();
+}
+
+maya::Element inter_turn_divider()
+{
+    using namespace maya::dsl;
+    return component([](int width, int) {
+        constexpr int body_indent = 2;
+        if (width <= body_indent) {
+            return blank().build();
+        }
+
+        std::string line(static_cast<std::size_t>(body_indent), ' ');
+        for (int column = body_indent; column < width; ++column) {
+            line += "─";
+        }
+        return text(std::move(line),
+            maya::Style{}.with_fg(maya::Color::bright_black()).with_dim())
+            .build();
+    });
 }
 
 maya::Element dock_element_for_density(
@@ -471,7 +484,7 @@ maya::Element conversation_element(const ConversationConfig& config)
     rows.reserve(config.turns.size() * 2 + 1);
     for (std::size_t index = 0; index < config.turns.size(); ++index) {
         if (index > 0 && !config.turns[index].continuation) {
-            rows.push_back(maya::Conversation::divider());
+            rows.push_back(inter_turn_divider());
         }
         const bool compact_tail = config.compact_tail
             && index + 1 == config.turns.size();
@@ -954,10 +967,19 @@ std::optional<QueuePreviewConfig> queue_preview_config(
 }
 
 ConversationConfig transcript_config(
-    const Model& model, const maya::Theme& theme)
+    const Model& model,
+    std::string_view model_name,
+    const maya::Theme& theme)
 {
     ConversationConfig cfg;
     cfg.fill_available_height = false;
+    std::string_view assistant_label = model_name;
+    if (assistant_label.empty()) {
+        assistant_label = model.domain.request_policy.provider_model();
+    }
+    if (assistant_label.empty()) {
+        assistant_label = "Assistant";
+    }
     const Message* last = nullptr;
     if (const auto* streaming = std::get_if<my_agent::Streaming>(
             &model.phase)) {
@@ -981,13 +1003,18 @@ ConversationConfig transcript_config(
         const Message& msg = model.domain.thread.messages[index];
         maya::Turn::Config turn;
         if (msg.role == Role::User) {
-            turn.label = "you";
+            turn.glyph = "❯";
+            turn.label = "You";
             turn.rail_color = theme.accent;    // 用户消息：强调色（旧 IR 同语义）
+            turn.body.emplace_back(
+                maya::Turn::PlainText{.content = msg.text});
         } else {
-            turn.label = "agent";
+            turn.glyph = "✦";
+            turn.label = assistant_label;
             turn.rail_color = theme.primary;   // 助手消息：主色（阅读主体）
+            turn.body.emplace_back(
+                maya::Turn::MarkdownText{.content = msg.text});
         }
-        turn.body.emplace_back(maya::Turn::PlainText{.content = msg.text});
         if (msg.error) {
             turn.error = *msg.error;
         }
@@ -1235,7 +1262,7 @@ ScreenConfig project_screen(
 {
     const ToolActivityProjection activity = tool_activity_projection(model);
     return ScreenConfig{
-        .transcript = transcript_config(model, theme),
+        .transcript = transcript_config(model, ui.status.model_name, theme),
         .dock = DockConfig{
             .permission = permission_config(activity),
             .transcript_guidance = transcript_guidance_config(ui, theme),

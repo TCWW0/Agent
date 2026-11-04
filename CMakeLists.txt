@@ -1380,6 +1380,7 @@ target_link_libraries(
     painter_test
     PRIVATE
         my_agent_ui_painter
+        my_agent_virtual_terminal
         GTest::gtest_main
 )
 
