@@ -113,13 +113,20 @@ TEST(ScreenTest, UsesTheRequestModelWhenNoUiModelNameIsAvailable)
     EXPECT_EQ("qwen2.5:7b", screen.transcript.turns.front().label);
 }
 
-TEST(ScreenTest, GivesUserAndAssistantTextRoleSpecificBodySemantics)
+TEST(ScreenTest, GivesConversationAndCompletedToolContentTypedBodySemantics)
 {
     my_agent::Model model = model_with({
         {.role = my_agent::Role::User, .text = "# literal prompt"},
         {.role = my_agent::Role::Assistant,
          .text = "## Answer",
-         .tool_calls = {{.id = "call-1", .name = "read"}}},
+         .tool_calls = {{
+             .id = "call-1",
+             .name = "read",
+             .args = {{"path", "README.md"}},
+             .status = my_agent::ToolCall::Done{
+                 .output = "first line\nsecond line",
+             },
+         }}},
     });
 
     const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
@@ -132,8 +139,146 @@ TEST(ScreenTest, GivesUserAndAssistantTextRoleSpecificBodySemantics)
     ASSERT_EQ(2u, screen.transcript.turns[1].body.size());
     EXPECT_TRUE(std::holds_alternative<maya::Turn::MarkdownText>(
         screen.transcript.turns[1].body[0]));
-    EXPECT_TRUE(std::holds_alternative<maya::Turn::PlainText>(
+    ASSERT_TRUE(std::holds_alternative<maya::AgentTimeline::Config>(
         screen.transcript.turns[1].body[1]));
+    const auto& timeline = std::get<maya::AgentTimeline::Config>(
+        screen.transcript.turns[1].body[1]);
+    EXPECT_EQ(" ACTIONS ", timeline.title);
+    ASSERT_EQ(1u, timeline.events.size());
+    const maya::AgentTimelineEvent& event = timeline.events.front();
+    EXPECT_EQ("read", event.name);
+    EXPECT_EQ(R"({"path":"README.md"})", event.detail);
+    EXPECT_EQ(maya::AgentEventStatus::Done, event.status);
+    EXPECT_EQ(maya::ToolBodyPreview::Kind::CodeBlock, event.body.kind);
+    EXPECT_EQ("first line\nsecond line", event.body.text);
+    EXPECT_FALSE(event.body.show_all);
+    EXPECT_FALSE(event.body.tail_only);
+    EXPECT_EQ(15, event.body.code_head);
+    EXPECT_EQ(14, event.body.code_tail);
+}
+
+TEST(ScreenTest, GroupsToolsFromOneAssistantMessageIntoOneOrderedTimeline)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "working",
+         .tool_calls = {
+             {
+                 .id = "call-1",
+                 .name = "read",
+                 .args = {{"path", "README.md"}},
+                 .status = my_agent::ToolCall::Done{.output = "read output"},
+             },
+             {
+                 .id = "call-2",
+                 .name = "search_docs",
+                 .args = {{"query", "logical runs"}},
+                 .status = my_agent::ToolCall::Done{.output = "search output"},
+             },
+         }},
+    });
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    ASSERT_EQ(1u, screen.transcript.turns.size());
+    const auto& body = screen.transcript.turns.front().body;
+    ASSERT_EQ(2u, body.size());
+    ASSERT_TRUE(std::holds_alternative<maya::AgentTimeline::Config>(body[1]));
+    const auto& timeline = std::get<maya::AgentTimeline::Config>(body[1]);
+    ASSERT_EQ(2u, timeline.events.size());
+    EXPECT_EQ("read", timeline.events[0].name);
+    EXPECT_EQ("read output", timeline.events[0].body.text);
+    EXPECT_EQ("search_docs", timeline.events[1].name);
+    EXPECT_EQ("search output", timeline.events[1].body.text);
+}
+
+TEST(ScreenTest, PreservesNonSuccessToolOutcomesInTimelineEvents)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "tool outcomes",
+         .tool_calls = {
+             {
+                 .id = "call-failed",
+                 .name = "build",
+                 .status = my_agent::ToolCall::Failed{.output = "exit 1"},
+             },
+             {
+                 .id = "call-rejected",
+                 .name = "write",
+                 .status = my_agent::ToolCall::Rejected{
+                     .output = "permission denied",
+                 },
+             },
+             {
+                 .id = "call-cancelled",
+                 .name = "search",
+                 .status = my_agent::ToolCall::Cancelled{
+                     .output = "cancelled by user",
+                 },
+             },
+         }},
+    });
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    const auto& timeline = std::get<maya::AgentTimeline::Config>(
+        screen.transcript.turns.front().body[1]);
+    ASSERT_EQ(3u, timeline.events.size());
+    EXPECT_EQ(maya::AgentEventStatus::Failed, timeline.events[0].status);
+    EXPECT_EQ(maya::ToolBodyPreview::Kind::Failure,
+              timeline.events[0].body.kind);
+    EXPECT_EQ(maya::AgentEventStatus::Rejected, timeline.events[1].status);
+    EXPECT_EQ(maya::AgentEventStatus::Rejected, timeline.events[2].status);
+    EXPECT_NE(std::string::npos,
+              timeline.events[2].detail.find("cancelled"));
+    EXPECT_EQ("cancelled by user", timeline.events[2].body.text);
+}
+
+TEST(ScreenTest, DistinguishesExecutingToolsFromAwaitingPermission)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "working",
+         .tool_calls = {{
+             .id = "call-1",
+             .name = "read",
+             .args = {{"path", "README.md"}},
+             .status = my_agent::ToolCall::Pending{
+                 .binding = my_agent::tool::ToolBinding{
+                     .ref = my_agent::tool::ToolRef{7},
+                     .effects = {my_agent::tool::Effect::ReadFs},
+                 },
+             },
+             .tool_exec_id = my_agent::ToolExecId{9},
+         }},
+         .id = my_agent::MessageId{11},
+         .turn_id = my_agent::TurnId{3}},
+    });
+    const my_agent::ToolCallRef call{
+        .assistant_message_id = my_agent::MessageId{11},
+        .tool_exec_id = my_agent::ToolExecId{9},
+    };
+
+    model.phase = my_agent::ExecutingTool{.call = call};
+    const auto executing = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+    const auto& running_timeline = std::get<maya::AgentTimeline::Config>(
+        executing.transcript.turns.front().body[1]);
+    ASSERT_EQ(1u, running_timeline.events.size());
+    EXPECT_EQ(maya::AgentEventStatus::Running,
+              running_timeline.events.front().status);
+
+    model.phase = my_agent::AwaitingPermission{.call = call};
+    const auto awaiting = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+    const auto& pending_timeline = std::get<maya::AgentTimeline::Config>(
+        awaiting.transcript.turns.front().body[1]);
+    ASSERT_EQ(1u, pending_timeline.events.size());
+    EXPECT_EQ(maya::AgentEventStatus::Pending,
+              pending_timeline.events.front().status);
 }
 
 TEST(ScreenTest, ProjectsAdjacentAssistantMessagesInTheSameTurnAsOneLogicalRun)
@@ -304,6 +449,55 @@ void count_animation_request(void* context) noexcept
 void count_delayed_animation_request(void* context, std::int64_t) noexcept
 {
     ++*static_cast<int*>(context);
+}
+
+TEST(ScreenTest, AdvancesExecutingToolTimelineWithTheSharedAnimationClock)
+{
+    int requests = 0;
+    my_agent::ui::MayaAnimationHostScope host{
+        &requests,
+        &count_animation_request,
+        &count_delayed_animation_request,
+    };
+    maya::testing::freeze_anim_clock(1'000);
+
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "working",
+         .tool_calls = {{
+             .id = "call-1",
+             .name = "read",
+             .status = my_agent::ToolCall::Pending{
+                 .binding = my_agent::tool::ToolBinding{
+                     .ref = my_agent::tool::ToolRef{7},
+                     .effects = {my_agent::tool::Effect::ReadFs},
+                 },
+             },
+             .tool_exec_id = my_agent::ToolExecId{9},
+         }},
+         .id = my_agent::MessageId{11},
+         .turn_id = my_agent::TurnId{3}},
+    });
+    model.phase = my_agent::ExecutingTool{
+        .call = my_agent::ToolCallRef{
+            .assistant_message_id = my_agent::MessageId{11},
+            .tool_exec_id = my_agent::ToolExecId{9},
+        },
+    };
+    const auto frame_of = [&model] {
+        const auto screen = my_agent::ui::project_screen(
+            model, my_agent::ui::UiState{}, maya::Theme{});
+        return std::get<maya::AgentTimeline::Config>(
+            screen.transcript.turns.front().body[1]).frame;
+    };
+
+    const int first = frame_of();
+    maya::testing::advance_anim_clock_ms(80);
+    const int second = frame_of();
+
+    EXPECT_NE(first, second);
+    EXPECT_GT(requests, 0);
+    maya::testing::unfreeze_anim_clock();
 }
 
 TEST(ScreenTest, ActivePhasesRequestBreathingButIdleDoesNot)

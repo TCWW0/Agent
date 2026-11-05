@@ -737,37 +737,81 @@ const Message* message_for(const Model& model, MessageId id)
     return nullptr;
 }
 
-std::string tool_status_label(const ToolCall& call)
+maya::AgentEventStatus tool_event_status(
+    const ToolCall& call,
+    ToolCallRef ref,
+    const ToolActivityProjection& activity)
 {
     return std::visit(
-        [](const auto& status) -> std::string {
+        [&activity, ref](const auto& status) -> maya::AgentEventStatus {
             using Status = std::decay_t<decltype(status)>;
             if constexpr (std::is_same_v<Status, ToolCall::Pending>) {
-                return "pending";
+                if (activity.kind == ToolActivityProjection::Kind::Executing
+                    && activity.call == ref) {
+                    return maya::AgentEventStatus::Running;
+                }
+                return maya::AgentEventStatus::Pending;
             } else if constexpr (std::is_same_v<Status, ToolCall::Done>) {
-                return "done";
+                return maya::AgentEventStatus::Done;
             } else if constexpr (std::is_same_v<Status, ToolCall::Failed>) {
-                return "failed";
-            } else if constexpr (
-                std::is_same_v<Status, ToolCall::Cancelled>) {
-                return "cancelled";
+                return maya::AgentEventStatus::Failed;
             } else {
-                return "rejected";
+                return maya::AgentEventStatus::Rejected;
             }
         },
         call.status);
 }
 
-std::string tool_call_text(const ToolCall& call)
+maya::AgentTimeline::Config tool_timeline_config(
+    const Message& message,
+    const ToolActivityProjection& activity,
+    const maya::Theme& theme)
 {
-    std::string text = "+-- tool_call [" + tool_status_label(call) + "] "
-        + call.name + "\n| args: " + call.args.dump();
-    if (!call.is_pending()) {
-        text += "\n| output: ";
-        text += call.output().empty() ? "(empty)" : call.output();
+    constexpr int kOutputHeadLineBudget = 15;
+    constexpr int kOutputTailLineBudget = 14;
+
+    maya::AgentTimeline::Config timeline;
+    timeline.title = " ACTIONS ";
+    timeline.border_color = theme.muted;
+
+    timeline.events.reserve(message.tool_calls.size());
+    bool has_live_event = false;
+    for (const ToolCall& call : message.tool_calls) {
+        maya::AgentTimelineEvent event;
+        event.name = call.name;
+        event.detail = call.args.dump();
+        if (std::holds_alternative<ToolCall::Cancelled>(call.status)) {
+            event.detail = "cancelled \u00b7 " + event.detail;
+        }
+        event.category_color = theme.info;
+        event.status = tool_event_status(
+            call,
+            ToolCallRef{
+                .assistant_message_id = message.id,
+                .tool_exec_id = call.tool_exec_id,
+            },
+            activity);
+        has_live_event = has_live_event
+            || event.status == maya::AgentEventStatus::Pending
+            || event.status == maya::AgentEventStatus::Running;
+        event.body.kind = std::holds_alternative<ToolCall::Failed>(call.status)
+            ? maya::ToolBodyPreview::Kind::Failure
+            : maya::ToolBodyPreview::Kind::CodeBlock;
+        event.body.text = call.output();
+        event.body.text_color = theme.primary;
+        event.body.chrome_color = theme.muted;
+        event.body.show_all = false;
+        event.body.tail_only = false;
+        event.body.code_head = kOutputHeadLineBudget;
+        event.body.code_tail = kOutputTailLineBudget;
+        timeline.events.push_back(std::move(event));
     }
-    text += "\n+--";
-    return text;
+    if (has_live_event
+        && (activity.kind == ToolActivityProjection::Kind::AwaitingPermission
+            || activity.kind == ToolActivityProjection::Kind::Executing)) {
+        timeline.frame = static_cast<int>(maya::anim::frame_index(10, 80.0));
+    }
+    return timeline;
 }
 
 std::optional<maya::Permission::Config> permission_config(
@@ -969,6 +1013,7 @@ std::optional<QueuePreviewConfig> queue_preview_config(
 ConversationConfig transcript_config(
     const Model& model,
     std::string_view model_name,
+    const ToolActivityProjection& activity,
     const maya::Theme& theme)
 {
     ConversationConfig cfg;
@@ -1024,10 +1069,8 @@ ConversationConfig transcript_config(
         if (msg.error) {
             turn.error = *msg.error;
         }
-        for (const ToolCall& call : msg.tool_calls) {
-            turn.body.emplace_back(maya::Turn::PlainText{
-                .content = tool_call_text(call),
-            });
+        if (!msg.tool_calls.empty()) {
+            turn.body.emplace_back(tool_timeline_config(msg, activity, theme));
         }
         cfg.turns.push_back(std::move(turn));
     }
@@ -1268,7 +1311,8 @@ ScreenConfig project_screen(
 {
     const ToolActivityProjection activity = tool_activity_projection(model);
     return ScreenConfig{
-        .transcript = transcript_config(model, ui.status.model_name, theme),
+        .transcript = transcript_config(
+            model, ui.status.model_name, activity, theme),
         .dock = DockConfig{
             .permission = permission_config(activity),
             .transcript_guidance = transcript_guidance_config(ui, theme),

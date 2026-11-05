@@ -1733,8 +1733,13 @@ TEST(UiLoopTest, ApprovesARealToolCallThroughThePtyAndShowsItsDetails)
     EXPECT_EQ(1, ::write(primary, &approve, 1));
     EXPECT_TRUE(read_until(kContinuationSentinel));
     const std::string screen = decoded_screen(seen, 80, 24);
-    EXPECT_NE(std::string::npos, screen.find("[done]"))
-        << "批准后屏幕上应是被标记为完成的工具调用:\n" << screen;
+    EXPECT_NE(std::string::npos, screen.find("ACTIONS")) << screen;
+    EXPECT_NE(std::string::npos, screen.find("✓")) << screen;
+    EXPECT_NE(std::string::npos, screen.find(kArgumentSentinel)) << screen;
+    EXPECT_NE(std::string::npos, screen.find("PTY_APPROVAL_OUTPUT_4C8D"))
+        << screen;
+    EXPECT_NE(std::string::npos, screen.find(kContinuationSentinel)) << screen;
+    EXPECT_EQ(std::string::npos, screen.find("+-- tool_call")) << screen;
     EXPECT_TRUE(received_expected_args.load(std::memory_order_acquire));
 
     stop();
@@ -1841,8 +1846,12 @@ TEST(UiLoopTest, RejectsARealToolCallThroughThePtyWithoutExecutingIt)
     EXPECT_EQ(1, ::write(primary, &reject, 1));
     EXPECT_TRUE(read_until(kContinuationSentinel));
     const std::string screen = decoded_screen(seen, 80, 24);
-    EXPECT_NE(std::string::npos, screen.find("[rejected]"))
-        << "拒绝后屏幕上应是被标记为拒绝的工具调用:\n" << screen;
+    EXPECT_NE(std::string::npos, screen.find("ACTIONS")) << screen;
+    EXPECT_NE(std::string::npos, screen.find(kArgumentSentinel)) << screen;
+    EXPECT_NE(std::string::npos,
+              screen.find("User rejected this tool call.")) << screen;
+    EXPECT_NE(std::string::npos, screen.find(kContinuationSentinel)) << screen;
+    EXPECT_EQ(std::string::npos, screen.find("+-- tool_call")) << screen;
     EXPECT_FALSE(tool_executed.load(std::memory_order_acquire));
 
     stop();

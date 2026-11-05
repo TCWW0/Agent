@@ -49,6 +49,33 @@ std::string rendered_screen(
     return text;
 }
 
+bool contains_inter_turn_divider(std::string_view text)
+{
+    constexpr std::string_view glyph = "─";
+    while (!text.empty()) {
+        const std::size_t end = text.find('\n');
+        std::string_view line = text.substr(0, end);
+        const std::size_t first = line.find_first_not_of(' ');
+        const std::size_t last = line.find_last_not_of(' ');
+        if (first != std::string_view::npos) {
+            line = line.substr(first, last - first + 1);
+            bool horizontal_only = false;
+            while (line.starts_with(glyph)) {
+                horizontal_only = true;
+                line.remove_prefix(glyph.size());
+            }
+            if (horizontal_only && line.empty()) {
+                return true;
+            }
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        text.remove_prefix(end + 1);
+    }
+    return false;
+}
+
 }  // namespace
 
 TEST(PainterTest, RendersWithExplicitSizeAndInjectedWriter)
@@ -286,12 +313,87 @@ TEST(PainterTest, RendersAToolAssistedLogicalRunWithOneAssistantHeader)
 
     const std::string_view inside_run{visible.data() + first,
                                       continuation - first};
-    EXPECT_EQ(std::string_view::npos, inside_run.find("─")) << visible;
+    EXPECT_FALSE(contains_inter_turn_divider(inside_run)) << visible;
     const std::string_view before_next_user{
         visible.data() + continuation,
         next_user - continuation,
     };
-    EXPECT_NE(std::string_view::npos, before_next_user.find("─")) << visible;
+    EXPECT_TRUE(contains_inter_turn_divider(before_next_user)) << visible;
+}
+
+TEST(PainterTest, RendersCompletedToolCallsAsLosslessActionCards)
+{
+    my_agent::Model model;
+    model.domain.thread.messages = {
+        {.role = my_agent::Role::Assistant,
+         .text = "I inspected the file.",
+         .tool_calls = {{
+             .id = "call-1",
+             .name = "read",
+             .args = {{"path", "README.md"}},
+             .status = my_agent::ToolCall::Done{
+                 .output = "CARD_OUTPUT_FIRST\nCARD_OUTPUT_SECOND",
+             },
+         }},
+         .turn_id = my_agent::TurnId{1}},
+    };
+    my_agent::ui::UiState ui;
+    ui.status.model_name = "run-model";
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, ui, maya::theme::dark);
+    const std::string visible = rendered_screen(
+        screen, my_agent::ui::Size{100, 24});
+
+    EXPECT_NE(std::string::npos, visible.find("✦ run-model")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("ACTIONS")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("read")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("README.md")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("CARD_OUTPUT_FIRST")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("CARD_OUTPUT_SECOND")) << visible;
+    EXPECT_EQ(std::string::npos, visible.find("+-- tool_call")) << visible;
+}
+
+TEST(PainterTest, CapsLongToolOutputWithAHeadAndTailPreview)
+{
+    std::string output;
+    for (int line = 1; line <= 35; ++line) {
+        if (!output.empty()) {
+            output += '\n';
+        }
+        output += "BUDGET_LINE_";
+        if (line < 10) {
+            output += '0';
+        }
+        output += std::to_string(line);
+    }
+
+    my_agent::Model model;
+    model.domain.thread.messages = {
+        {.role = my_agent::Role::Assistant,
+         .text = "Long tool output follows.",
+         .tool_calls = {{
+             .id = "call-1",
+             .name = "read",
+             .status = my_agent::ToolCall::Done{
+                 .output = std::move(output),
+             },
+         }},
+         .turn_id = my_agent::TurnId{1}},
+    };
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::theme::dark);
+    const std::string visible = rendered_screen(
+        screen, my_agent::ui::Size{100, 48});
+
+    EXPECT_NE(std::string::npos, visible.find("BUDGET_LINE_01")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("BUDGET_LINE_15")) << visible;
+    EXPECT_EQ(std::string::npos, visible.find("BUDGET_LINE_16")) << visible;
+    EXPECT_EQ(std::string::npos, visible.find("BUDGET_LINE_21")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("BUDGET_LINE_22")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("BUDGET_LINE_35")) << visible;
+    EXPECT_NE(std::string::npos, visible.find("⋯ 6 more")) << visible;
 }
 
 TEST(PainterTest, FrozenTranscriptHoldsItsPositionWhileTailContinuesGrowing)
