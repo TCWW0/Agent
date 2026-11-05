@@ -136,6 +136,53 @@ TEST(ScreenTest, GivesUserAndAssistantTextRoleSpecificBodySemantics)
         screen.transcript.turns[1].body[1]));
 }
 
+TEST(ScreenTest, ProjectsAdjacentAssistantMessagesInTheSameTurnAsOneLogicalRun)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "first response",
+         .turn_id = my_agent::TurnId{42}},
+        {.role = my_agent::Role::Assistant,
+         .text = "continued response",
+         .turn_id = my_agent::TurnId{42}},
+    });
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    ASSERT_EQ(2u, screen.transcript.turns.size());
+    EXPECT_FALSE(screen.transcript.turns[0].continuation);
+    EXPECT_TRUE(screen.transcript.turns[1].continuation);
+    EXPECT_EQ("first response\n", turn_text(screen.transcript.turns[0]));
+    EXPECT_EQ("continued response\n", turn_text(screen.transcript.turns[1]));
+}
+
+TEST(ScreenTest, KeepsDifferentAndUnknownAssistantTurnsIndependent)
+{
+    my_agent::Model model = model_with({
+        {.role = my_agent::Role::Assistant,
+         .text = "turn seven",
+         .turn_id = my_agent::TurnId{7}},
+        {.role = my_agent::Role::Assistant,
+         .text = "turn eight",
+         .turn_id = my_agent::TurnId{8}},
+        {.role = my_agent::Role::Assistant,
+         .text = "unknown one",
+         .turn_id = my_agent::TurnId{0}},
+        {.role = my_agent::Role::Assistant,
+         .text = "unknown two",
+         .turn_id = my_agent::TurnId{0}},
+    });
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, my_agent::ui::UiState{}, maya::Theme{});
+
+    ASSERT_EQ(4u, screen.transcript.turns.size());
+    for (const maya::Turn::Config& turn : screen.transcript.turns) {
+        EXPECT_FALSE(turn.continuation);
+    }
+}
+
 TEST(ScreenTest, PermissionCardUsesThePendingCallBinding)
 {
     my_agent::Model model;

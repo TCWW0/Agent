@@ -242,6 +242,58 @@ TEST(PainterTest, AlignsTheInterTurnDividerWithTheBodyTextColumn)
     EXPECT_LE(lines[divider_row].size() - divider_end - 1, 2u) << visible;
 }
 
+TEST(PainterTest, RendersAToolAssistedLogicalRunWithOneAssistantHeader)
+{
+    my_agent::Model model;
+    model.domain.thread.messages = {
+        {.role = my_agent::Role::User,
+         .text = "RUN_PROMPT",
+         .turn_id = my_agent::TurnId{1}},
+        {.role = my_agent::Role::Assistant,
+         .text = "RUN_FIRST_RESPONSE",
+         .tool_calls = {{.id = "call-1", .name = "RUN_TOOL_MARKER"}},
+         .turn_id = my_agent::TurnId{1}},
+        {.role = my_agent::Role::Assistant,
+         .text = "RUN_CONTINUED_RESPONSE",
+         .turn_id = my_agent::TurnId{1}},
+        {.role = my_agent::Role::User,
+         .text = "NEXT_USER_TURN",
+         .turn_id = my_agent::TurnId{2}},
+    };
+    my_agent::ui::UiState ui;
+    ui.status.model_name = "run-model";
+
+    const my_agent::ui::ScreenConfig screen = my_agent::ui::project_screen(
+        model, ui, maya::theme::dark);
+    const std::string visible = rendered_screen(
+        screen, my_agent::ui::Size{100, 30});
+
+    const std::size_t header = visible.find("✦ run-model");
+    const std::size_t first = visible.find("RUN_FIRST_RESPONSE");
+    const std::size_t tool = visible.find("RUN_TOOL_MARKER");
+    const std::size_t continuation = visible.find("RUN_CONTINUED_RESPONSE");
+    const std::size_t next_user = visible.find("NEXT_USER_TURN");
+    ASSERT_NE(std::string::npos, header) << visible;
+    EXPECT_EQ(std::string::npos,
+              visible.find("✦ run-model", header + 1)) << visible;
+    ASSERT_NE(std::string::npos, first) << visible;
+    ASSERT_NE(std::string::npos, tool) << visible;
+    ASSERT_NE(std::string::npos, continuation) << visible;
+    ASSERT_NE(std::string::npos, next_user) << visible;
+    ASSERT_LT(first, tool) << visible;
+    ASSERT_LT(tool, continuation) << visible;
+    ASSERT_LT(continuation, next_user) << visible;
+
+    const std::string_view inside_run{visible.data() + first,
+                                      continuation - first};
+    EXPECT_EQ(std::string_view::npos, inside_run.find("─")) << visible;
+    const std::string_view before_next_user{
+        visible.data() + continuation,
+        next_user - continuation,
+    };
+    EXPECT_NE(std::string_view::npos, before_next_user.find("─")) << visible;
+}
+
 TEST(PainterTest, FrozenTranscriptHoldsItsPositionWhileTailContinuesGrowing)
 {
     my_agent::ui::Painter painter;

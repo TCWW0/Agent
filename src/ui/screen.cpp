@@ -1002,6 +1002,12 @@ ConversationConfig transcript_config(
     for (std::size_t index = 0; index < turn_count; ++index) {
         const Message& msg = model.domain.thread.messages[index];
         maya::Turn::Config turn;
+        if (msg.role == Role::Assistant && index > 0) {
+            const Message& previous = model.domain.thread.messages[index - 1];
+            turn.continuation = previous.role == Role::Assistant
+                && msg.turn_id.value != 0
+                && msg.turn_id == previous.turn_id;
+        }
         if (msg.role == Role::User) {
             turn.glyph = "❯";
             turn.label = "You";
