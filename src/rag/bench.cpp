@@ -41,6 +41,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -61,9 +62,19 @@ constexpr const char* kRewriteCache = "rag_bench_rewrites.json";
 
 struct Case { std::string query; std::uint32_t gold; };
 
+struct LineInterval {
+    std::uint32_t start;
+    std::uint32_t end;
+};
+
+struct GoldTarget {
+    std::string path;
+    std::optional<LineInterval> lines;
+};
+
 struct Judgment {
     std::string query;
-    std::vector<std::string> gold;
+    std::vector<GoldTarget> gold;
 };
 
 bool covers(const rag::Chunk& c, const rag::Chunk& gold) {
@@ -202,16 +213,36 @@ load_judgments(const fs::path& path) {
             }
 
             for (const auto& value : item.at("gold")) {
-                if (!value.is_string()) {
-                    return std::unexpected("case.gold 的每一项都必须是字符串");
-                }
+                GoldTarget target;
 
-                std::string path_value = value.get<std::string>();
-                if (path_value.empty()) {
-                    return std::unexpected("case.gold 不能包含空路径");
-                }
+                if (value.is_string()) {
+                    target.path = value.get<std::string>();
+                    if (target.path.empty()) {
+                        return std::unexpected("case.gold 不能包含空路径");
+                    }
+                } else if (
+                    value.is_object() && value.contains("path") && value.at("path").is_string()
+                    && value.contains("line_start") && value.at("line_start").is_number_unsigned()
+                    && value.contains("line_end") && value.at("line_end").is_number_unsigned()
+                ) {
+                    target.path = value.at("path").get<std::string>();
 
-                judgment.gold.push_back(std::move(path_value));
+                    const auto line_start = value.at("line_start").get<std::uint32_t>();
+                    const auto line_end = value.at("line_end").get<std::uint32_t>();
+
+                    if (target.path.empty()) {
+                        return std::unexpected("case.gold 不能包含空路径");
+                    }
+                    if (line_start == 0 || line_end < line_start) {
+                        return std::unexpected("case.gold 行区间必须满足 1 <= line_start <= line_end");
+                    }
+                    target.lines = LineInterval{.start = line_start, .end = line_end};
+                } else {
+                    return std::unexpected(
+                        "case.gold 的每一项都必须是路径字符串，"
+                        "或包含 path、line_start、line_end 的对象");
+                }
+                judgment.gold.push_back(std::move(target));
             }
 
             if (judgment.gold.empty()) {
@@ -233,20 +264,62 @@ std::string normalized_path(std::string_view value) {
     return fs::path(std::string{value}).lexically_normal().generic_string();
 }
 
-bool is_gold_path(std::string_view candidate, const std::vector<std::string>& gold) {
+bool is_gold_path(std::string_view candidate, const std::vector<GoldTarget>& gold) {
     const std::string normalized_candidate = normalized_path(candidate);
 
     return std::any_of(
         gold.begin(),
         gold.end(),
-        [&](const std::string& expected) {
-            return normalized_candidate == normalized_path(expected);
+        [&](const GoldTarget& expected) {
+            return normalized_candidate == normalized_path(expected.path);
         }
     );
 }
 
-nlohmann::json describe_stage(const rag::RetrievalResult& result, const std::vector<std::string>& gold) {
+bool is_gold_passage(std::string_view candidate_path, std::uint32_t candidate_start,
+                     std::uint32_t candidate_end, const std::vector<GoldTarget>& gold) {
+    const std::string normalized_candidate = normalized_path(candidate_path);
+
+    return std::any_of(
+        gold.begin(),
+        gold.end(),
+        [&](const GoldTarget& expected) {
+            return expected.lines.has_value()
+                && normalized_candidate == normalized_path(expected.path)
+                && candidate_start <= expected.lines->end
+                && expected.lines->start <= candidate_end;
+        }
+    );
+}
+
+nlohmann::json describe_gold(const std::vector<GoldTarget>& gold) {
+    nlohmann::json output = nlohmann::json::array();
+
+    for (const GoldTarget& target : gold) {
+        if (target.lines) {
+            output.push_back({
+                {"path", target.path},
+                {"line_start", target.lines->start},
+                {"line_end", target.lines->end},
+            });
+        } else {
+            output.push_back(target.path);
+        }
+    }
+    return output;
+}
+
+nlohmann::json describe_stage(const rag::RetrievalResult& result, const std::vector<GoldTarget>& gold) {
+    const bool has_passage_gold = std::any_of(
+        gold.begin(),
+        gold.end(),
+        [](const GoldTarget& target) {
+            return target.lines.has_value();
+        }
+    );
+
     std::size_t gold_rank = 0;
+    std::size_t passage_rank = 0;
     nlohmann::json hits = nlohmann::json::array();
 
     for (std::size_t i = 0; i < result.passages.size(); ++i) {
@@ -256,6 +329,11 @@ nlohmann::json describe_stage(const rag::RetrievalResult& result, const std::vec
             gold_rank = i + 1;
         }
 
+        if (has_passage_gold && passage_rank == 0
+            && is_gold_passage(provenance.path, provenance.line_start, provenance.line_end, gold)) {
+            passage_rank = i + 1;
+        }
+
         hits.push_back({
             {"path", provenance.path},
             {"line_start", provenance.line_start},
@@ -263,13 +341,21 @@ nlohmann::json describe_stage(const rag::RetrievalResult& result, const std::vec
         });
     }
 
-    return nlohmann::json{
+    nlohmann::json stage{
         {"gold_rank", gold_rank},
         {"hits", std::move(hits)},
     };
+
+    if (has_passage_gold) {
+        stage["passage_rank"] = passage_rank;
+        stage["passage_hit_at_one"] = passage_rank == 1;
+    }
+
+    return stage;
 }
 
-int run_judgments(const fs::path& docs_root, const fs::path& judgments_path) {
+int run_judgments(const fs::path& docs_root, const fs::path& judgments_path,
+                  std::size_t candidate_k) {
     auto loaded = load_judgments(judgments_path);
     if (!loaded) {
         std::cerr << loaded.error() << "\n";
@@ -286,19 +372,38 @@ int run_judgments(const fs::path& docs_root, const fs::path& judgments_path) {
         return 2;
     }
 
-    constexpr std::size_t kCandidateK = 4;
-
     std::size_t retrieval_hit_at_one = 0;
     std::size_t local_rerank_hit_at_one = 0;
+    std::size_t passage_cases = 0;
+    std::size_t retrieval_passage_hit_at_one = 0;
+    std::size_t local_rerank_passage_hit_at_one = 0;
 
     for (const Judgment& judgment : *loaded) {
         rag::RetrievalResult result = corpus.retrieve(
             judgment.query,
             rag::ollama_embed,
             config,
-            kCandidateK);
+            candidate_k);
 
         const auto before = describe_stage(result, judgment.gold);
+        const bool has_passage_judgment = before.contains("passage_rank");
+
+        if (has_passage_judgment) {
+            ++passage_cases;
+            if (before.at("passage_hit_at_one").get<bool>()) {
+                ++retrieval_passage_hit_at_one;
+            }
+        }
+
+        const bool candidate_miss =
+            has_passage_judgment
+            && before.at("gold_rank").get<std::size_t>() == 0
+            && before.at("passage_rank").get<std::size_t>() == 0;
+
+        const bool incomplete_evidence =
+            has_passage_judgment
+            && before.at("gold_rank").get<std::size_t>() > 0
+            && before.at("passage_rank").get<std::size_t>() == 0;
 
         if (!result.passages.empty()
             && is_gold_path(result.passages.front().provenance.path, judgment.gold)) {
@@ -309,17 +414,35 @@ int run_judgments(const fs::path& docs_root, const fs::path& judgments_path) {
 
         const auto after = describe_stage(reranked.retrieval, judgment.gold);
 
+        if (has_passage_judgment
+            && after.at("passage_hit_at_one").get<bool>()) {
+            ++local_rerank_passage_hit_at_one;
+        }
+
+        const bool ranking_miss =
+            has_passage_judgment
+            && before.at("passage_rank").get<std::size_t>() > 0
+            && after.contains("passage_rank")
+            && after.at("passage_rank").get<std::size_t>() != 1;
         if (!reranked.retrieval.passages.empty()
             && is_gold_path(reranked.retrieval.passages.front().provenance.path, judgment.gold)) {
             ++local_rerank_hit_at_one;
         }
 
-        const nlohmann::json report{
+        nlohmann::json report{
             {"q", judgment.query},
-            {"gold", judgment.gold},
+            {"gold", describe_gold(judgment.gold)},
             {"retrieval", before},
             {"local_rerank", after},
         };
+
+        if (candidate_miss) {
+            report["failure_class"] = "candidate_miss";
+        } else if (incomplete_evidence) {
+            report["failure_class"] = "incomplete_evidence";
+        } else if (ranking_miss) {
+            report["failure_class"] = "ranking_miss";
+        }
 
         std::cout << "[case] " << report.dump() << "\n";
     }
@@ -327,24 +450,45 @@ int run_judgments(const fs::path& docs_root, const fs::path& judgments_path) {
     const double case_count = static_cast<double>(loaded->size());
     const double retrieval_score = static_cast<double>(retrieval_hit_at_one) / case_count;
     const double local_rerank_score = static_cast<double>(local_rerank_hit_at_one) / case_count;
+    const double passage_case_count = static_cast<double>(passage_cases);
+    const double retrieval_passage_score = passage_cases == 0
+        ? 0.0
+        : static_cast<double>(retrieval_passage_hit_at_one) / passage_case_count;
+    const double local_rerank_passage_score = passage_cases == 0
+        ? 0.0
+        : static_cast<double>(local_rerank_passage_hit_at_one) / passage_case_count;
 
     std::cout
         << "[judgments] cases=" << loaded->size()
         << " hit@1="
         << std::fixed
         << std::setprecision(3)
-        << retrieval_score
-        << "\n";
+        << retrieval_score;
+
+    if (passage_cases > 0) {
+        std::cout
+            << " passage_cases=" << passage_cases
+            << " passage_hit@1=" << retrieval_passage_score;
+    }
+
+    std::cout << "\n";
 
     std::cout
         << "[judgments] stage=local-rerank"
-        << " candidate_k=" << kCandidateK
+        << " candidate_k=" << candidate_k
         << " cases=" << loaded->size()
         << " hit@1="
         << std::fixed
         << std::setprecision(3)
-        << local_rerank_score
-        << "\n";
+        << local_rerank_score;
+
+    if (passage_cases > 0) {
+        std::cout
+            << " passage_cases=" << passage_cases
+            << " passage_hit@1=" << local_rerank_passage_score;
+    }
+
+    std::cout << "\n";
 
     return 0;
 }
@@ -458,16 +602,32 @@ void save_rewrite_cache(const std::unordered_map<std::string, std::string>& map)
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "用法: rag_bench <docs目录> [k] [probe_n] [embed_model]\n"
-                  << "      rag_bench <docs目录> --judgments <cases.json>\n";
+                  << "      rag_bench <docs目录> --judgments <cases.json> [candidate_k]\n";
         return 1;
     }
     const fs::path root = argv[1];
     if (argc >= 3 && std::string_view{argv[2]} == "--judgments") {
-        if (argc != 4) {
-            std::cerr << "用法: rag_bench <docs目录> --judgments <cases.json>\n";
+        if (argc != 4 && argc != 5) {
+            std::cerr << "用法: rag_bench <docs目录> --judgments <cases.json> [candidate_k]\n";
             return 1;
         }
-        return run_judgments(root, argv[3]);
+
+        std::size_t candidate_k = 4;
+        if (argc == 5) {
+            try {
+                const std::string value = argv[4];
+                std::size_t parsed = 0;
+                candidate_k = std::stoul(value, &parsed);
+                if (parsed != value.size() || candidate_k == 0 || candidate_k > 80) {
+                    throw std::invalid_argument{"candidate_k out of range"};
+                }
+            } catch (const std::exception&) {
+                std::cerr << "candidate_k 必须是 1..80 之间的整数\n";
+                return 1;
+            }
+        }
+
+        return run_judgments(root, argv[3], candidate_k);
     }
 
     const std::size_t k = argc >= 3 ? std::stoul(argv[2]) : 5;

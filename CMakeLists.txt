@@ -1407,6 +1407,22 @@ target_link_libraries(
         nlohmann_json::nlohmann_json
 )
 
+# 人工 passage judgments 的学习型质量阶梯。与 Agentty 的 rag-bench 一样，
+# 它是只出报告、不设质量阈值的量具，因此刻意不 add_test；后续每次检索
+# 实验都用同一批 query 比较 bm25-only → retrieval → +local-rerank。
+add_executable(
+    rag_quality_ladder
+    tests/rag_quality_ladder.cpp
+)
+
+target_link_libraries(
+    rag_quality_ladder
+    PRIVATE
+        my_agent_rag
+        my_agent_http
+        nlohmann_json::nlohmann_json
+)
+
 add_test(
     NAME rag_bench.judgments_reports_hit_at_one
     COMMAND ${CMAKE_COMMAND}
@@ -1432,6 +1448,34 @@ add_test(
 
 set_tests_properties(
     rag_bench.judgments_reports_each_case
+    PROPERTIES TIMEOUT 15
+)
+
+add_test(
+    NAME rag_bench.judgments_rejects_invalid_passages
+    COMMAND ${CMAKE_COMMAND}
+        -DRAG_BENCH=$<TARGET_FILE:rag_bench>
+        -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rag_bench_invalid_judgments
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/rag_bench_judgments_validation_test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/rag_bench_judgments_validation_test.cmake
+)
+
+set_tests_properties(
+    rag_bench.judgments_rejects_invalid_passages
+    PROPERTIES TIMEOUT 15
+)
+
+add_test(
+    NAME rag_bench.judgments_honors_candidate_budget
+    COMMAND ${CMAKE_COMMAND}
+        -DRAG_BENCH=$<TARGET_FILE:rag_bench>
+        -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/rag_bench_case_report
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/rag_bench_candidate_budget_test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/rag_bench_candidate_budget_test.cmake
+)
+
+set_tests_properties(
+    rag_bench.judgments_honors_candidate_budget
     PROPERTIES TIMEOUT 15
 )
 

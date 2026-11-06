@@ -336,10 +336,10 @@ bm25_search(const Bm25Index& idx, std::string_view query,std::size_t k) {
 
         for(const auto& p:plist){
             const double tf   = static_cast<double>(p.tf);
-            const double dl   = static_cast<double>(idx.doc_len[p.doc]);
+            const double dl   = static_cast<double>(idx.doc_len[p.chunk_id]);
             const double adl  = idx.avg_doc_len > 0.0 ? idx.avg_doc_len :1.0;
             const double norm = tf * (kK1 + 1.0) / (tf +kK1 * (1.0-kB+kB*dl/adl));
-            scores[p.doc]+=idf*norm;
+            scores[p.chunk_id]+=idf*norm;
         }
     }
 

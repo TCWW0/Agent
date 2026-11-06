@@ -48,3 +48,29 @@ if(local_match_position EQUAL -1)
         "actual stdout:\n${stdout}"
     )
 endif()
+
+string(REGEX MATCH "\\[case\\] ([^\r\n]+)" case_match "${stdout}")
+if(NOT case_match)
+    message(FATAL_ERROR "missing [case] report:\n${stdout}")
+endif()
+set(report "${CMAKE_MATCH_1}")
+
+string(JSON gold_type TYPE "${report}" gold 0)
+string(JSON gold_path GET "${report}" gold 0)
+if(NOT gold_type STREQUAL "STRING" OR NOT gold_path STREQUAL "deployment.md")
+    message(FATAL_ERROR "legacy gold changed shape: ${report}")
+endif()
+
+foreach(passage_field IN ITEMS passage_rank passage_hit_at_one failure_class)
+    string(FIND "${report}" "\"${passage_field}\"" field_position)
+    if(NOT field_position EQUAL -1)
+        message(FATAL_ERROR
+            "legacy path judgment must not report ${passage_field}: ${report}")
+    endif()
+endforeach()
+
+string(FIND "${stdout}" "passage_cases=" passage_summary_position)
+if(NOT passage_summary_position EQUAL -1)
+    message(FATAL_ERROR
+        "legacy path-only summary must not report passage metrics:\n${stdout}")
+endif()

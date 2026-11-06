@@ -26,7 +26,7 @@ struct Chunk {
 void tokenize(std::string_view s, std::vector<std::string>& out);
 
 struct Bm25Index {
-    struct Posting { std::uint32_t doc; std::uint32_t tf; };
+    struct Posting { std::uint32_t chunk_id; std::uint32_t tf; };
     std::vector<std::vector<Posting>> postings;
     std::vector<std::uint32_t>        doc_len;
     double avg_doc_len = 0.0;

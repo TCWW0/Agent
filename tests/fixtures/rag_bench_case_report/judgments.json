@@ -1,7 +1,28 @@
 {
   "cases": [
-    {"q": "migrations", "gold": ["procedure.md"]},
-    {"q": "deployment", "gold": ["procedure.md"]},
-    {"q": "unfindabletokenxyz", "gold": ["procedure.md"]}
+    {
+      "q": "migrations",
+      "gold": [
+        {"path": "procedure.md", "line_start": 1, "line_end": 1}
+      ]
+    },
+    {
+      "q": "deployment",
+      "gold": [
+        {"path": "procedure.md", "line_start": 1, "line_end": 1}
+      ]
+    },
+    {
+      "q": "unfindabletokenxyz",
+      "gold": [
+        {"path": "procedure.md", "line_start": 1, "line_end": 1}
+      ]
+    },
+    {
+      "q": "firstsectiontoken",
+      "gold": [
+        {"path": "handbook.md", "line_start": 45, "line_end": 45}
+      ]
+    }
   ]
 }

@@ -19,7 +19,8 @@ std::vector<std::string> distinct_terms(std::string_view text) {
     return terms;
 }
 
-double lexical_coverage(const std::vector<std::string>& query_terms, std::string_view passage) {
+double lexical_coverage(const std::vector<std::string>& query_terms,
+                        std::string_view passage) {
     const std::vector<std::string> passage_terms = distinct_terms(passage);
 
     std::size_t covered = 0;

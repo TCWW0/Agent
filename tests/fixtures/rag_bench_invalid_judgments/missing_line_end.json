@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {
+      "q": "validation",
+      "gold": [
+        {"path": "a.md", "line_start": 1}
+      ]
+    }
+  ]
+}

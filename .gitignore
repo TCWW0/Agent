@@ -16,3 +16,6 @@ docs/*
 .agents/
 # rag_bench 改写探针的本地缓存（按 gold 块身份生成，LLM 产物）
 rag_bench_rewrites.json
+
+# 本地 RAG 质量实验快照；审核后的正式基线应单独放入 eval/baselines/。
+results/

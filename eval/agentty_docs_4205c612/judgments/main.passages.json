@@ -1,0 +1,241 @@
+{
+  "tool": "search_docs",
+  "cases": [
+    {
+      "q": "agentty behind a corporate proxy that intercepts tls",
+      "document_gold": ["website/proxies.md", "website/troubleshooting.md"],
+      "gold": [
+        {"path": "website/configuration.md", "line_start": 255, "line_end": 257},
+        {"path": "website/proxies.md", "line_start": 23, "line_end": 25},
+        {"path": "website/troubleshooting.md", "line_start": 50, "line_end": 52}
+      ]
+    },
+    {
+      "q": "run a script before a tool call to block writes outside the repo",
+      "document_gold": ["website/hooks.md"],
+      "gold": [
+        {"path": "website/hooks.md", "line_start": 80, "line_end": 91}
+      ]
+    },
+    {
+      "q": "make the agent ask before every edit instead of acting on its own",
+      "document_gold": ["website/profiles.md"],
+      "gold": [
+        {"path": "website/profiles.md", "line_start": 9, "line_end": 27}
+      ]
+    },
+    {
+      "q": "use agentty on a remote machine that has no internet",
+      "document_gold": ["website/airgap.md", "website/acp.md"],
+      "gold": [
+        {"path": "website/airgap.md", "line_start": 16, "line_end": 24},
+        {"path": "website/acp.md", "line_start": 199, "line_end": 206}
+      ]
+    },
+    {
+      "q": "turn on debug logs for one subsystem",
+      "document_gold": ["website/logging.md", "website/performance.md"],
+      "gold": [
+        {"path": "website/logging.md", "line_start": 53, "line_end": 68},
+        {"path": "website/performance.md", "line_start": 60, "line_end": 65}
+      ]
+    },
+    {
+      "q": "what key submits the prompt and how do I insert a newline",
+      "document_gold": ["website/keybindings.md", "agent_panel/08_composer.md", "agent_panel/12_keymap.md"],
+      "gold": [
+        {"path": "website/keybindings.md", "line_start": 74, "line_end": 79},
+        {"path": "agent_panel/08_composer.md", "line_start": 133, "line_end": 133},
+        {"path": "agent_panel/12_keymap.md", "line_start": 57, "line_end": 61}
+      ]
+    },
+    {
+      "q": "why does a plugin need my approval and what gets recorded",
+      "document_gold": ["website/plugin-trust.md"],
+      "gold": [
+        {"path": "website/plugin-trust.md", "line_start": 35, "line_end": 55}
+      ]
+    },
+    {
+      "q": "define my own subagent type with a different model",
+      "document_gold": ["website/subagents.md"],
+      "gold": [
+        {"path": "website/subagents.md", "line_start": 31, "line_end": 53},
+        {"path": "website/subagents.md", "line_start": 74, "line_end": 78}
+      ]
+    },
+    {
+      "q": "go back to an earlier point in a conversation",
+      "document_gold": ["website/threads.md"],
+      "gold": [
+        {"path": "website/threads.md", "line_start": 46, "line_end": 54}
+      ]
+    },
+    {
+      "q": "which files does agentty keep under ~/.agentty",
+      "document_gold": ["website/storage.md", "design/data-dirs.md"],
+      "gold": [
+        {"path": "website/storage.md", "line_start": 41, "line_end": 56},
+        {"path": "design/data-dirs.md", "line_start": 101, "line_end": 118}
+      ]
+    },
+    {
+      "q": "h2 socket hangup error",
+      "document_gold": ["website/troubleshooting.md"],
+      "gold": [
+        {"path": "website/troubleshooting.md", "line_start": 11, "line_end": 21}
+      ]
+    },
+    {
+      "q": "list of environment variables for retrieval",
+      "document_gold": ["website/environment.md", "website/retrieval.md", "website/configuration.md"],
+      "gold": [
+        {"path": "website/environment.md", "line_start": 107, "line_end": 117},
+        {"path": "website/retrieval.md", "line_start": 70, "line_end": 84},
+        {"path": "website/configuration.md", "line_start": 36, "line_end": 47}
+      ]
+    },
+    {
+      "q": "stop the agent from reading files in a sibling project",
+      "document_gold": ["website/workspace.md"],
+      "gold": [
+        {"path": "website/workspace.md", "line_start": 9, "line_end": 15}
+      ]
+    },
+    {
+      "q": "what checks run before a skill is installed",
+      "document_gold": ["website/skill-install.md"],
+      "gold": [
+        {"path": "website/skill-install.md", "line_start": 95, "line_end": 106}
+      ]
+    },
+    {
+      "q": "how smart mode decides which model handles a turn",
+      "document_gold": ["website/smart-mode-routing.md", "website/smart-mode.md"],
+      "gold": [
+        {"path": "website/smart-mode-routing.md", "line_start": 8, "line_end": 9},
+        {"path": "website/smart-mode-routing.md", "line_start": 28, "line_end": 36},
+        {"path": "website/smart-mode.md", "line_start": 19, "line_end": 29}
+      ]
+    },
+    {
+      "q": "repeat the same prompt until I stop it",
+      "document_gold": ["design/loop-mode.md"],
+      "gold": [
+        {"path": "design/loop-mode.md", "line_start": 1, "line_end": 9}
+      ]
+    },
+    {
+      "q": "why landlock can't stop shell commands from writing files",
+      "document_gold": ["design/shell-write-gate.md"],
+      "gold": [
+        {"path": "design/shell-write-gate.md", "line_start": 25, "line_end": 28},
+        {"path": "design/shell-write-gate.md", "line_start": 95, "line_end": 103}
+      ]
+    },
+    {
+      "q": "how threads are stored on disk so loading a long one is fast",
+      "document_gold": ["THREAD_STORE.md"],
+      "gold": [
+        {"path": "THREAD_STORE.md", "line_start": 16, "line_end": 36},
+        {"path": "THREAD_STORE.md", "line_start": 67, "line_end": 80},
+        {"path": "website/threads.md", "line_start": 13, "line_end": 22}
+      ]
+    },
+    {
+      "q": "the typewriter animation for streamed text skipped characters",
+      "document_gold": ["STREAMING_REVEAL.md"],
+      "gold": [
+        {"path": "STREAMING_REVEAL.md", "line_start": 69, "line_end": 80}
+      ]
+    },
+    {
+      "q": "how the terminal scrollback stays correct while the ui redraws",
+      "document_gold": ["INLINE_SCROLLBACK.md"],
+      "gold": [
+        {"path": "INLINE_SCROLLBACK.md", "line_start": 24, "line_end": 42}
+      ]
+    },
+    {
+      "q": "how agentty knows a model's context window size",
+      "document_gold": ["CONTEXT_WINDOW.md"],
+      "gold": [
+        {"path": "CONTEXT_WINDOW.md", "line_start": 8, "line_end": 20},
+        {"path": "CONTEXT_WINDOW.md", "line_start": 24, "line_end": 39}
+      ]
+    },
+    {
+      "q": "streamed tool call arguments landing on the wrong call",
+      "document_gold": ["TOOL_CALL_ATTRIBUTION.md", "COPILOT_RESPONSES.md"],
+      "gold": [
+        {"path": "TOOL_CALL_ATTRIBUTION.md", "line_start": 28, "line_end": 35},
+        {"path": "TOOL_CALL_ATTRIBUTION.md", "line_start": 45, "line_end": 55},
+        {"path": "COPILOT_RESPONSES.md", "line_start": 97, "line_end": 112}
+      ]
+    },
+    {
+      "q": "cycling themes skipped every other one",
+      "document_gold": ["THEME_SWITCH_POSTMORTEM.md"],
+      "gold": [
+        {"path": "THEME_SWITCH_POSTMORTEM.md", "line_start": 12, "line_end": 42}
+      ]
+    },
+    {
+      "q": "translating the interface into other languages",
+      "document_gold": ["design/i18n.md"],
+      "gold": [
+        {"path": "design/i18n.md", "line_start": 4, "line_end": 29}
+      ]
+    },
+    {
+      "q": "long running background commands like dev servers",
+      "document_gold": ["design/background-processes.md", "website/tools.md"],
+      "gold": [
+        {"path": "design/background-processes.md", "line_start": 1, "line_end": 3},
+        {"path": "website/tools.md", "line_start": 19, "line_end": 19}
+      ]
+    },
+    {
+      "q": "the model writes files with shell commands instead of the edit tool",
+      "document_gold": ["SHELL_DETOURS.md"],
+      "gold": [
+        {"path": "SHELL_DETOURS.md", "line_start": 1, "line_end": 18}
+      ]
+    },
+    {
+      "q": "paste an image from my laptop into agentty over ssh",
+      "document_gold": ["website/clipboard.md"],
+      "gold": [
+        {"path": "website/clipboard.md", "line_start": 34, "line_end": 45},
+        {"path": "website/clipboard.md", "line_start": 76, "line_end": 113}
+      ]
+    },
+    {
+      "q": "use a local model through ollama",
+      "document_gold": ["website/content/guides/run-ai-coding-agent-locally-with-ollama.md", "website/providers.md"],
+      "gold": [
+        {"path": "website/content/guides/run-ai-coding-agent-locally-with-ollama.md", "line_start": 11, "line_end": 28},
+        {"path": "website/providers.md", "line_start": 212, "line_end": 219}
+      ]
+    },
+    {
+      "q": "connect agentty to zed as an agent",
+      "document_gold": ["website/acp.md", "acp-editor-integration.md", "website/content/blog/agentty-0-2-0-zed-acp.md"],
+      "gold": [
+        {"path": "website/acp.md", "line_start": 9, "line_end": 24},
+        {"path": "acp-editor-integration.md", "line_start": 1, "line_end": 10},
+        {"path": "website/content/blog/agentty-0-2-0-zed-acp.md", "line_start": 13, "line_end": 31},
+        {"path": "website/content/blog/agentty-0-2-0-zed-acp.md", "line_start": 56, "line_end": 68}
+      ]
+    },
+    {
+      "q": "add an mcp server",
+      "document_gold": ["website/mcp.md", "website/content/guides/mcp-terminal-client.md"],
+      "gold": [
+        {"path": "website/plugins.md", "line_start": 9, "line_end": 13},
+        {"path": "website/mcp.md", "line_start": 44, "line_end": 46},
+        {"path": "website/content/guides/mcp-terminal-client.md", "line_start": 34, "line_end": 34}
+      ]
+    }
+  ]
+}
