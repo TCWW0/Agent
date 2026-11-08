@@ -25,6 +25,7 @@
 
 #include "my_agent/http/http_client.hpp"
 #include "my_agent/rag/rag.hpp"
+#include "my_agent/rag/tokenizer.hpp"
 #include "nlohmann/json_fwd.hpp"
 
 #include <cstddef>
@@ -84,8 +85,7 @@ bool covers(const rag::Chunk& c, const rag::Chunk& gold) {
 }
 
 std::string synthesize_query(const rag::Chunk& c, const rag::Bm25Index& idx) {
-    std::vector<std::string> toks;
-    rag::tokenize(c.text, toks);
+    const std::vector<std::string> toks = rag::tokenize(c.text);
 
     std::unordered_map<std::string, std::uint32_t> tf;
     for (const auto& t : toks) ++tf[t];

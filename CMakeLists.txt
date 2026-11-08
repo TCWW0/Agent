@@ -127,6 +127,7 @@ target_link_libraries(
 # 切片 #41：语义路（embed.cpp）+ 混合检索（hybrid.cpp）。
 add_library(
     my_agent_rag
+    src/rag/tokenizer.cpp
     src/rag/bm25.cpp
     src/rag/corpus.cpp
     src/rag/embed.cpp
@@ -157,6 +158,7 @@ target_compile_features(
 
 add_executable(
     rag_test
+    tests/rag_tokenizer_test.cpp
     tests/rag_test.cpp
 )
 

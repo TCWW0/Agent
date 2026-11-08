@@ -1,4 +1,5 @@
 #include "my_agent/rag/rag.hpp"
+#include "my_agent/rag/tokenizer.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -420,10 +421,19 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    const rag::Bm25Index& bm25_index = corpus.bm25();
+    std::size_t posting_count = 0;
+    for (const auto& term_postings : bm25_index.postings) {
+        posting_count += term_postings.size();
+    }
+
     std::cout << "rag-quality-ladder: cases=" << judgments->size()
               << " chunks=" << corpus.chunk_count()
               << " candidate_k=" << options.candidate_k
               << " dense=" << (build.dense_ok ? "ready" : "off/fallback")
+              << " vocabulary=" << bm25_index.term_ids.size()
+              << " avg_doc_len=" << bm25_index.avg_doc_len
+              << " postings=" << posting_count
               << " build_ms=" << std::fixed << std::setprecision(1) << build_ms
               << "\n";
 
@@ -520,6 +530,12 @@ int main(int argc, char** argv) {
                 {"chunks", corpus.chunk_count()},
                 {"cases", judgments->size()},
                 {"chunker_identity", rag::kChunkerIdentity},
+                {"tokenizer_identity", rag::tokenizer_identity()},
+                {"bm25_index", {
+                    {"vocabulary", bm25_index.term_ids.size()},
+                    {"avg_doc_len", bm25_index.avg_doc_len},
+                    {"postings", posting_count},
+                }},
             }},
             {"stages", {
                 {"bm25_only", metrics_json(bm25_metrics, options.candidate_k)},

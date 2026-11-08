@@ -23,8 +23,6 @@ struct Chunk {
     std::string context;
 };
 
-void tokenize(std::string_view s, std::vector<std::string>& out);
-
 struct Bm25Index {
     struct Posting { std::uint32_t chunk_id; std::uint32_t tf; };
     std::vector<std::vector<Posting>> postings;

@@ -32,13 +32,6 @@ namespace{
         return c;
     }
 
-    // 简单的分词器
-    std::vector<std::string> toks_of(std::string_view s){
-        std::vector<std::string> out;
-        rag::tokenize(s, out);
-        return out;
-    }
-
     // 最小的 utf-8 编码校验器，多字节序列必须完整(没被从中间切开)
     bool is_valid_utf8(std::string_view s){
         std::size_t i = 0;
@@ -74,48 +67,6 @@ namespace{
     }
 
 } //namespace
-
-// ── A. tokenize：分词契约（索引/查询共用的唯一入口）─────────────────────
-
-TEST(Tokenize,LowercaseAlphanumericRuns) {
-    EXPECT_EQ(toks_of("The Quick-Brown FOX"),
-        (std::vector<std::string>{"the","quick","brown","fox"}));
-}
-
-//ASCII 字母/数字组成的普通 token，长度必须至少为 2 才会进入最终 token 列表。
-TEST(Tokenize, DropsSingleCharacterTokens) {
-    EXPECT_EQ(toks_of("a I am"), (std::vector<std::string>{"am"}));
-}
-
-//数字可以出现在 token 中，数字不是天然的分隔符。
-TEST(Tokenize, DigitsAreKeptAndShortRunsDropped) {
-    EXPECT_EQ(toks_of("k1=1.5"), (std::vector<std::string>{"k1"}));
-}
-
-// 中文字符默认按照2字进行切割
-TEST(Tokenize, CjkRunBecomesOverlappingBigrams) {
-    EXPECT_EQ(toks_of("检索引擎"),
-              (std::vector<std::string>{"检索", "索引", "引擎"}));
-    EXPECT_EQ(toks_of("注册表"),
-              (std::vector<std::string>{"注册", "册表"}));
-}
-
-// 当中文字符长度只有1时，此时需要保留为token
-TEST(Tokenize, LoneCjkCharIsEmittedAsIs) {
-    EXPECT_EQ(toks_of("图"), (std::vector<std::string>{"图"}));
-}
-
-// 不同文字体系之间不能混在一起处理
-TEST(Tokenize, MixedScriptRunsSplitAtBoundaries) {
-    EXPECT_EQ(toks_of("配置BM25参数"),
-              (std::vector<std::string>{"配置", "bm25", "参数"}));
-}
-
-// 对于极端的标点场景，不切分出token
-TEST(Tokenize, PunctuationOnlyAndEmptyProduceNothing) {
-    EXPECT_TRUE(toks_of("!!! ... ???").empty());
-    EXPECT_TRUE(toks_of("").empty());
-}
 
 // ── B. chunker：切块契约（行对齐 + 双上限 + 面包屑 + overlap）────────────
 TEST(Chunker,ChunksAreLineAlignedWithConsistentSpans){
@@ -434,6 +385,19 @@ TEST(Bm25, ChineseCorpusIsSearchableViaBigrams) {
     // ↑ agentty 原版 tokenizer 在这里直接失明（中文产出零 token）。
     ASSERT_FALSE(hits.empty());
     EXPECT_EQ(hits.size(), 1u);   // 只有块 0 与查询共享 bigram
+    EXPECT_EQ(hits[0].first, 0u);
+}
+
+TEST(Bm25, CamelIdentifierIsSearchableBySemanticParts) {
+    const std::vector<rag::Chunk> chunks{
+        make_chunk("Configure HybridRrfWeights before retrieval"),
+        make_chunk("Configure dense retrieval before startup"),
+    };
+    const auto idx = rag::build_bm25(chunks);
+
+    const auto hits = rag::bm25_search(idx, "rrf weights", 2);
+
+    ASSERT_FALSE(hits.empty());
     EXPECT_EQ(hits[0].first, 0u);
 }
 

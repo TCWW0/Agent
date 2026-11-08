@@ -1,6 +1,6 @@
 #include "my_agent/rag/rag.hpp"
+#include "my_agent/rag/tokenizer.hpp"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,66 +15,7 @@ namespace {
 constexpr double kK1 = 1.5;         // tf 饱和旋钮
 constexpr double kB  = 0.75;
 constexpr int    kHeadingBoost = 3; // 面包屑入袋份数
-
-// ── UTF-8：首字节 → 码点字节长度 ───────────────────────────────────────
-std::size_t utf8_seq_len(unsigned char b) {
-    if      ((b & 0x80) == 0x00) return 1;
-    else if ((b & 0xE0) == 0xC0) return 2;
-    else if ((b & 0xF0) == 0xE0) return 3;
-    else if ((b & 0xF8) == 0xF0) return 4;
-    return 1;   // 非法首字节：按 1 字节容错前进
-}
-} // namespace（B2：内部链接 —— rag.hpp 不声明这些，具名 ns 下的外部符号
-  //     会在 #41 的 dense.cpp 出现同名时撞 ODR）
-
-/*
- * 一个简单的分词器，规则如下
- * 1. 按照utf8编码对于数据进行解释
- * 2. 连续常规英文/数字作为一个整体识别，在遇到ASCII范围内非英文/数字时停止，此时已经识别的作为一个token返回
- * 3. 对于非ascii的utf8字，解析到时直接落缓存，在识别到常规ascii字符时/解析完时触发对应字的落袋
- * TODO: 根据实际的场景来进行进一步的优化
- */
-void tokenize(std::string_view s, std::vector<std::string>& out) {
-    std::string word;               // 常规ASCII编码的字符组成的字
-    std::vector<std::string> run;   // CJK 码点段（每元素=一个码点）
-    auto flush_word = [&]{
-        if (word.size() > 1) out.push_back(word);
-        word.clear();
-    };
-    auto flush_run = [&]{
-        if (run.size()==1){
-            out.push_back(std::move(run[0]));    // 单独的字原样发出
-        } else {
-            for (std::size_t k=0;k+1<run.size();++k){
-                out.push_back(run[k]+run[k+1]);     // 重叠 bigram
-            }
-        }
-        run.clear();
-    };
-
-    std::size_t i=0;
-    while(i<s.size()){
-        const auto b = static_cast<unsigned char>(s[i]);
-        if (b<0x80 && std::isalnum(b)) {    // 属于一个ascii的数字/字母
-            flush_run();                    // 脚本切换：先落袋 CJK 段
-            word.push_back(static_cast<char>(std::tolower(b)));
-            ++i;
-        } else if(b<0x80) {     
-            flush_word();                   // 标点/空格：双缓冲都断
-            flush_run();
-            ++i;
-        } else {                            // 属于一个 utf8 常规编码字，正常解析
-            flush_word();
-            std::size_t len = utf8_seq_len(b);
-            // TODO: 修改这里的截断逻辑增强容错？
-            if (i+len>s.size()) len = s.size()-i;
-            run.emplace_back(s.substr(i,len));
-            i+=len;
-        }
-    }
-    flush_word();
-    flush_run();
-}
+} // namespace
 
 // chunker辅助
 namespace{
@@ -276,15 +217,22 @@ Bm25Index build_bm25(const std::vector<Chunk>& chunks) {
     idx.doc_count = chunks.size();
     idx.doc_len.assign(chunks.size(),0);
 
-    std::vector<std::string> toks;
     std::uint64_t total_len = 0;
 
     for (std::uint32_t d =0;d<chunks.size();d++){
-        toks.clear();
-        tokenize(chunks[d].text, toks);
-        // 将面包屑也入袋来抬高相应的权重
-        for (int r = 0;r<kHeadingBoost;++r)
-            tokenize(chunks[d].context, toks);
+        std::vector<std::string> toks = tokenize(chunks[d].text);
+
+        const std::vector<std::string> context_tokens =
+            tokenize(chunks[d].context);
+
+        toks.reserve(
+            toks.size()
+            + static_cast<std::size_t>(kHeadingBoost) * context_tokens.size());
+
+        for (int repeat = 0; repeat < kHeadingBoost; ++repeat) {
+            toks.insert(toks.end(), context_tokens.begin(), context_tokens.end());
+        }
+
         idx.doc_len[d] = static_cast<std::uint32_t>(toks.size());
         total_len += toks.size();
 
@@ -317,8 +265,7 @@ bm25_search(const Bm25Index& idx, std::string_view query,std::size_t k) {
     std::vector<std::pair<std::uint32_t, double>> out;
     if (idx.doc_count == 0|| k == 0) return out;
 
-    std::vector<std::string> qtoks;
-    tokenize(query, qtoks);
+    const std::vector<std::string> qtoks = tokenize(query);
 
     std::unordered_map<std::uint32_t, double> scores;
     const double N = static_cast<double>(idx.doc_count);

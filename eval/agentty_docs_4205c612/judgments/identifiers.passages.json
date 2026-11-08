@@ -1,0 +1,65 @@
+{
+  "tool": "search_docs",
+  "purpose": "M2-A technical-identifier retrieval slice",
+  "cases": [
+    {
+      "q": "icon name alert circle",
+      "gold": [
+        {"path": "agent_panel/01_zed_anatomy.md", "line_start": 438, "line_end": 448},
+        {"path": "agent_panel/03_translation.md", "line_start": 176, "line_end": 186}
+      ]
+    },
+    {
+      "q": "cache id builder",
+      "gold": [
+        {"path": "INLINE_SCROLLBACK.md", "line_start": 308, "line_end": 319}
+      ]
+    },
+    {
+      "q": "cancel token ptr",
+      "gold": [
+        {"path": "internal/lock_migration_spec.md", "line_start": 111, "line_end": 112},
+        {"path": "internal-acp-backends.md", "line_start": 154, "line_end": 159}
+      ]
+    },
+    {
+      "q": "model capabilities effort set",
+      "gold": [
+        {"path": "design/capability-resolution.md", "line_start": 40, "line_end": 49}
+      ]
+    },
+    {
+      "q": "agent status running",
+      "gold": [
+        {"path": "agent_panel/07_tool_cards.md", "line_start": 482, "line_end": 488}
+      ]
+    },
+    {
+      "q": "some widget config",
+      "gold": [
+        {"path": "UI.md", "line_start": 14, "line_end": 21},
+        {"path": "RENDERING.md", "line_start": 75, "line_end": 82}
+      ]
+    },
+    {
+      "q": "AGENTTY_RAG_BM25_WEIGHT",
+      "gold": [
+        {"path": "website/retrieval.md", "line_start": 106, "line_end": 110},
+        {"path": "website/configuration.md", "line_start": 35, "line_end": 40},
+        {"path": "website/environment.md", "line_start": 112, "line_end": 117}
+      ]
+    },
+    {
+      "q": "ModelCapabilities::extended_context_1m",
+      "gold": [
+        {"path": "ARCHITECTURE.md", "line_start": 386, "line_end": 391}
+      ]
+    },
+    {
+      "q": "run-ai-coding-agent-locally-with-ollama",
+      "gold": [
+        {"path": "website/content/guides/run-ai-coding-agent-locally-with-ollama.md", "line_start": 1, "line_end": 30}
+      ]
+    }
+  ]
+}

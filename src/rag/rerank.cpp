@@ -1,4 +1,5 @@
 #include "my_agent/rag/rag.hpp"
+#include "my_agent/rag/tokenizer.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -11,8 +12,7 @@ namespace my_agent::rag {
 namespace {
 
 std::vector<std::string> distinct_terms(std::string_view text) {
-    std::vector<std::string> terms;
-    tokenize(text, terms);
+    std::vector<std::string> terms = tokenize(text);
 
     std::sort(terms.begin(),terms.end());
     terms.erase(std::unique(terms.begin(),terms.end()),terms.end());

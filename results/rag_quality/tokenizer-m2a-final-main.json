@@ -1,0 +1,588 @@
+{
+  "cases": [
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "agentty behind a corporate proxy that intercepts tls",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "run a script before a tool call to block writes outside the repo",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "make the agent ask before every edit instead of acting on its own",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "use agentty on a remote machine that has no internet",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "turn on debug logs for one subsystem",
+      "ranks": {
+        "bm25_only": 3,
+        "dense_only": null,
+        "local_rerank": 3,
+        "retrieval": 3
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "what key submits the prompt and how do I insert a newline",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "why does a plugin need my approval and what gets recorded",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "define my own subagent type with a different model",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "go back to an earlier point in a conversation",
+      "ranks": {
+        "bm25_only": 12,
+        "dense_only": null,
+        "local_rerank": 13,
+        "retrieval": 12
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "which files does agentty keep under ~/.agentty",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "h2 socket hangup error",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "improved",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "list of environment variables for retrieval",
+      "ranks": {
+        "bm25_only": 8,
+        "dense_only": null,
+        "local_rerank": 7,
+        "retrieval": 8
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "stop the agent from reading files in a sibling project",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "what checks run before a skill is installed",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "how smart mode decides which model handles a turn",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "repeat the same prompt until I stop it",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "why landlock can't stop shell commands from writing files",
+      "ranks": {
+        "bm25_only": 7,
+        "dense_only": null,
+        "local_rerank": 7,
+        "retrieval": 7
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "how threads are stored on disk so loading a long one is fast",
+      "ranks": {
+        "bm25_only": 2,
+        "dense_only": null,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "the typewriter animation for streamed text skipped characters",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "how the terminal scrollback stays correct while the ui redraws",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "how agentty knows a model's context window size",
+      "ranks": {
+        "bm25_only": 12,
+        "dense_only": null,
+        "local_rerank": 12,
+        "retrieval": 12
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "streamed tool call arguments landing on the wrong call",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "cycling themes skipped every other one",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "translating the interface into other languages",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": null,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "long running background commands like dev servers",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "the model writes files with shell commands instead of the edit tool",
+      "ranks": {
+        "bm25_only": 7,
+        "dense_only": null,
+        "local_rerank": 8,
+        "retrieval": 7
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "paste an image from my laptop into agentty over ssh",
+      "ranks": {
+        "bm25_only": 3,
+        "dense_only": null,
+        "local_rerank": 3,
+        "retrieval": 3
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "improved",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "use a local model through ollama",
+      "ranks": {
+        "bm25_only": 6,
+        "dense_only": null,
+        "local_rerank": 5,
+        "retrieval": 6
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "connect agentty to zed as an agent",
+      "ranks": {
+        "bm25_only": 2,
+        "dense_only": null,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "add an mcp server",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    }
+  ],
+  "dataset": {
+    "bm25_index": {
+      "avg_doc_len": 87.21889041723979,
+      "postings": 413660,
+      "vocabulary": 11300
+    },
+    "cases": 30,
+    "chunker_identity": "chunker-v1",
+    "chunks": 10905,
+    "docs_root": "eval/agentty_docs_4205c612/docs",
+    "judgments_path": "eval/agentty_docs_4205c612/judgments/main.passages.json",
+    "tokenizer_identity": "technical-tokenizer-v2-identifier-parts"
+  },
+  "run": {
+    "build_ms": 2197.256972,
+    "candidate_k": 16,
+    "dense_queries": 0,
+    "dense_ready": false,
+    "embed_model": "",
+    "fusion": {
+      "bm25_weight": 1.0,
+      "dense_weight": 1.0,
+      "method": "rrf",
+      "rrf_k": 60.0
+    },
+    "generated_at_unix_ms": 1794140461369,
+    "hybrid_queries": 0,
+    "label": "tokenizer-m2a-final-main"
+  },
+  "schema_version": 1,
+  "stages": {
+    "bm25_only": {
+      "candidate_recall": {
+        "hits": 23,
+        "k": 16,
+        "score": 0.7666666666666667
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 13,
+        "score": 0.43333333333333335
+      },
+      "hit_at_4": {
+        "hits": 17,
+        "score": 0.5666666666666667
+      },
+      "mean_ms_per_query": 1.8773657999999995,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 15.244047619047619,
+        "score": 0.5081349206349206
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.600198237703335,
+        "score": 0.5533399412567779
+      },
+      "recall_at_10": {
+        "hits": 21,
+        "score": 0.7
+      }
+    },
+    "dense_only": {
+      "available": false
+    },
+    "local_rerank": {
+      "candidate_recall": {
+        "hits": 23,
+        "k": 16,
+        "score": 0.7666666666666667
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 13,
+        "score": 0.43333333333333335
+      },
+      "hit_at_4": {
+        "hits": 17,
+        "score": 0.5666666666666667
+      },
+      "mean_ms_per_query": 2.8392818333333336,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 15.277380952380954,
+        "score": 0.5092460317460318
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.630843857829852,
+        "score": 0.5543614619276618
+      },
+      "recall_at_10": {
+        "hits": 21,
+        "score": 0.7
+      }
+    },
+    "retrieval": {
+      "candidate_recall": {
+        "hits": 23,
+        "k": 16,
+        "score": 0.7666666666666667
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 13,
+        "score": 0.43333333333333335
+      },
+      "hit_at_4": {
+        "hits": 17,
+        "score": 0.5666666666666667
+      },
+      "mean_ms_per_query": 1.912758666666667,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 15.244047619047619,
+        "score": 0.5081349206349206
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.600198237703335,
+        "score": 0.5533399412567779
+      },
+      "recall_at_10": {
+        "hits": 21,
+        "score": 0.7
+      }
+    }
+  },
+  "transitions": {
+    "dense_vs_bm25": {},
+    "rerank_vs_retrieval": {
+      "degraded": 2,
+      "improved": 2,
+      "unchanged": 26
+    },
+    "retrieval_vs_bm25": {
+      "unchanged": 30
+    },
+    "retrieval_vs_dense": {}
+  }
+}
