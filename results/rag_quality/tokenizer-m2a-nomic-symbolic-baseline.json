@@ -1,0 +1,222 @@
+{
+  "cases": [
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved"
+      },
+      "q": "C++26 toolchain CMake requirements",
+      "ranks": {
+        "bm25_only": 2,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved"
+      },
+      "q": "--auth-header X-API-Key",
+      "ranks": {
+        "bm25_only": 3,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded"
+      },
+      "q": "-k one-off API key override",
+      "ranks": {
+        "bm25_only": 1,
+        "local_rerank": 6,
+        "retrieval": 6
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded"
+      },
+      "q": "--sandbox-backend bwrap claybin",
+      "ranks": {
+        "bm25_only": 3,
+        "local_rerank": 4,
+        "retrieval": 4
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged"
+      },
+      "q": "v0.2.10 v0.2.11 Windows MSI",
+      "ranks": {
+        "bm25_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged"
+      },
+      "q": "v0.7.0 loop mode shipped",
+      "ranks": {
+        "bm25_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded"
+      },
+      "q": "HTTP/2 SSE NDJSON native C++ transport",
+      "ranks": {
+        "bm25_only": 1,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged"
+      },
+      "q": "HTTP/1.1 streaming gateway ALPN",
+      "ranks": {
+        "bm25_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    }
+  ],
+  "dataset": {
+    "bm25_index": {
+      "avg_doc_len": 87.21889041723979,
+      "postings": 413660,
+      "vocabulary": 11300
+    },
+    "cases": 8,
+    "chunker_identity": "chunker-v1",
+    "chunks": 10905,
+    "docs_root": "eval/agentty_docs_4205c612/docs",
+    "judgments_path": "eval/agentty_docs_4205c612/judgments/symbolic-atoms.passages.json",
+    "tokenizer_identity": "technical-tokenizer-v2-identifier-parts"
+  },
+  "run": {
+    "build_ms": 1856.338335,
+    "candidate_k": 16,
+    "dense_ready": true,
+    "embed_model": "nomic-embed-text:latest",
+    "generated_at_unix_ms": 1794392930224,
+    "hybrid_queries": 8,
+    "label": "tokenizer-m2a-nomic-symbolic-baseline"
+  },
+  "schema_version": 1,
+  "stages": {
+    "bm25_only": {
+      "candidate_recall": {
+        "hits": 8,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 8,
+      "hit_at_1": {
+        "hits": 5,
+        "score": 0.625
+      },
+      "hit_at_4": {
+        "hits": 8,
+        "score": 1.0
+      },
+      "mean_ms_per_query": 0.347455625,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 6.166666666666666,
+        "score": 0.7708333333333333
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 6.630929753571458,
+        "score": 0.8288662191964322
+      },
+      "recall_at_10": {
+        "hits": 8,
+        "score": 1.0
+      }
+    },
+    "local_rerank": {
+      "candidate_recall": {
+        "hits": 8,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 8,
+      "hit_at_1": {
+        "hits": 5,
+        "score": 0.625
+      },
+      "hit_at_4": {
+        "hits": 7,
+        "score": 0.875
+      },
+      "mean_ms_per_query": 107.07305787500002,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 5.916666666666666,
+        "score": 0.7395833333333333
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 6.4178134987528725,
+        "score": 0.8022266873441091
+      },
+      "recall_at_10": {
+        "hits": 8,
+        "score": 1.0
+      }
+    },
+    "retrieval": {
+      "candidate_recall": {
+        "hits": 8,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 8,
+      "hit_at_1": {
+        "hits": 5,
+        "score": 0.625
+      },
+      "hit_at_4": {
+        "hits": 7,
+        "score": 0.875
+      },
+      "mean_ms_per_query": 106.324637375,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 5.916666666666666,
+        "score": 0.7395833333333333
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 6.4178134987528725,
+        "score": 0.8022266873441091
+      },
+      "recall_at_10": {
+        "hits": 8,
+        "score": 1.0
+      }
+    }
+  },
+  "transitions": {
+    "rerank_vs_retrieval": {
+      "unchanged": 8
+    },
+    "retrieval_vs_bm25": {
+      "degraded": 3,
+      "improved": 2,
+      "unchanged": 3
+    }
+  }
+}

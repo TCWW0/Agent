@@ -1,0 +1,2114 @@
+{
+  "cases": [
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "agentty behind a corporate proxy that intercepts tls",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "run a script before a tool call to block writes outside the repo",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "make the agent ask before every edit instead of acting on its own",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 0,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "use agentty on a remote machine that has no internet",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "lost",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "lost",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "turn on debug logs for one subsystem",
+      "ranks": {
+        "bm25_only": 3,
+        "dense_only": 0,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "what key submits the prompt and how do I insert a newline",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "improved",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "why does a plugin need my approval and what gets recorded",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 4,
+        "local_rerank": 1,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "recovered",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "recovered",
+        "retrieval_vs_dense": "degraded"
+      },
+      "q": "define my own subagent type with a different model",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 8,
+        "local_rerank": 9,
+        "retrieval": 9
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "go back to an earlier point in a conversation",
+      "ranks": {
+        "bm25_only": 12,
+        "dense_only": 12,
+        "local_rerank": 3,
+        "retrieval": 3
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "which files does agentty keep under ~/.agentty",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 0,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "h2 socket hangup error",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "improved",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "degraded"
+      },
+      "q": "list of environment variables for retrieval",
+      "ranks": {
+        "bm25_only": 8,
+        "dense_only": 10,
+        "local_rerank": 15,
+        "retrieval": 16
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "recovered",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "recovered",
+        "retrieval_vs_dense": "degraded"
+      },
+      "q": "stop the agent from reading files in a sibling project",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 5,
+        "local_rerank": 7,
+        "retrieval": 7
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "improved",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "what checks run before a skill is installed",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 2,
+        "local_rerank": 1,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "how smart mode decides which model handles a turn",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 9,
+        "local_rerank": 6,
+        "retrieval": 6
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "repeat the same prompt until I stop it",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 1,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "improved",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "why landlock can't stop shell commands from writing files",
+      "ranks": {
+        "bm25_only": 7,
+        "dense_only": 4,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "how threads are stored on disk so loading a long one is fast",
+      "ranks": {
+        "bm25_only": 2,
+        "dense_only": 3,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "recovered",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "lost"
+      },
+      "q": "the typewriter animation for streamed text skipped characters",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 9,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "unchanged",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "how the terminal scrollback stays correct while the ui redraws",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 0,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "improved",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "how agentty knows a model's context window size",
+      "ranks": {
+        "bm25_only": 12,
+        "dense_only": 9,
+        "local_rerank": 7,
+        "retrieval": 7
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "streamed tool call arguments landing on the wrong call",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 4,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "cycling themes skipped every other one",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 14,
+        "local_rerank": 2,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "recovered",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "recovered",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "translating the interface into other languages",
+      "ranks": {
+        "bm25_only": 0,
+        "dense_only": 5,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "lost",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "lost",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "long running background commands like dev servers",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 0,
+        "local_rerank": 0,
+        "retrieval": 0
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "improved",
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "diagnostic": {
+        "gold": [
+          {
+            "line_end": 18,
+            "line_start": 1,
+            "path": "SHELL_DETOURS.md"
+          }
+        ],
+        "local_rerank_candidates": [
+          {
+            "bm25": {
+              "rank": 1,
+              "raw_score": 26.017337645373175,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "dense": {
+              "rank": 1,
+              "raw_score": 0.7418867669014522,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "line_end": 247,
+            "line_start": 243,
+            "local_rerank": {
+              "final_score": 0.9818181818181818,
+              "lexical_coverage": 0.8181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 1.0,
+            "path": "website/providers.md",
+            "rank": 1,
+            "relevant": false,
+            "retrieval_score": 0.03278688524590164
+          },
+          {
+            "bm25": {
+              "rank": 2,
+              "raw_score": 26.017337645373175,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "dense": {
+              "rank": 2,
+              "raw_score": 0.7418867669014522,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "line_end": 247,
+            "line_start": 244,
+            "local_rerank": {
+              "final_score": 0.9459006299226549,
+              "lexical_coverage": 0.8181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.96009160900497,
+            "path": "website/providers.md",
+            "rank": 2,
+            "relevant": false,
+            "retrieval_score": 0.03225806451612903
+          },
+          {
+            "bm25": {
+              "rank": 4,
+              "raw_score": 20.780929605475873,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "dense": {
+              "rank": 12,
+              "raw_score": 0.7023991143612934,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "line_end": 134,
+            "line_start": 130,
+            "local_rerank": {
+              "final_score": 0.7595159726036802,
+              "lexical_coverage": 0.8181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.7529975453172204,
+            "path": "website/acp.md",
+            "rank": 3,
+            "relevant": false,
+            "retrieval_score": 0.029513888888888888
+          },
+          {
+            "bm25": {
+              "rank": 8,
+              "raw_score": 18.21712753081716,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "dense": {
+              "rank": 6,
+              "raw_score": 0.7117390531924622,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "line_end": 5,
+            "line_start": 2,
+            "local_rerank": {
+              "final_score": 0.7555743816340048,
+              "lexical_coverage": 0.5454545454545454,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.7789210300983892,
+            "path": "SHELL_DETOURS.md",
+            "rank": 4,
+            "relevant": true,
+            "retrieval_score": 0.029857397504456328
+          },
+          {
+            "bm25": {
+              "rank": 7,
+              "raw_score": 18.34219035942734,
+              "weighted_rrf_contribution": 0.014925373134328358
+            },
+            "dense": {
+              "rank": 9,
+              "raw_score": 0.7078130179441522,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "line_end": 138,
+            "line_start": 133,
+            "local_rerank": {
+              "final_score": 0.7530117999615382,
+              "lexical_coverage": 0.8181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.7457706868259516,
+            "path": "website/acp.md",
+            "rank": 5,
+            "relevant": false,
+            "retrieval_score": 0.029418126757516764
+          },
+          {
+            "bm25": {
+              "rank": 5,
+              "raw_score": 19.326364270450984,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "dense": {
+              "rank": 17,
+              "raw_score": 0.6979804795506311,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "line_end": 136,
+            "line_start": 131,
+            "local_rerank": {
+              "final_score": 0.6819335347432024,
+              "lexical_coverage": 0.8181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.6667948365833563,
+            "path": "website/acp.md",
+            "rank": 6,
+            "relevant": false,
+            "retrieval_score": 0.028371628371628373
+          },
+          {
+            "bm25": {
+              "rank": 14,
+              "raw_score": 16.192956687231785,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "dense": {
+              "rank": 7,
+              "raw_score": 0.7081057728227412,
+              "weighted_rrf_contribution": 0.014925373134328358
+            },
+            "line_end": 260,
+            "line_start": 256,
+            "local_rerank": {
+              "final_score": 0.6410471775049943,
+              "lexical_coverage": 0.36363636363636365,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.6718706012681754,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 7,
+            "relevant": false,
+            "retrieval_score": 0.028438886647841874
+          },
+          {
+            "bm25": {
+              "rank": 15,
+              "raw_score": 16.192956687231785,
+              "weighted_rrf_contribution": 0.013333333333333334
+            },
+            "dense": {
+              "rank": 8,
+              "raw_score": 0.7081057728227412,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "line_end": 260,
+            "line_start": 257,
+            "local_rerank": {
+              "final_score": 0.6139014895713847,
+              "lexical_coverage": 0.36363636363636365,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.6417087257863869,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 8,
+            "relevant": false,
+            "retrieval_score": 0.02803921568627451
+          },
+          {
+            "bm25": {
+              "rank": 3,
+              "raw_score": 21.44105172616417,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "dense": {
+              "rank": 29,
+              "raw_score": 0.6907260345563924,
+              "weighted_rrf_contribution": 0.011235955056179775
+            },
+            "line_end": 73,
+            "line_start": 70,
+            "local_rerank": {
+              "final_score": 0.5689009995401929,
+              "lexical_coverage": 0.5454545454545454,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.5715061611052648,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 9,
+            "relevant": false,
+            "retrieval_score": 0.027108970929195647
+          },
+          {
+            "bm25": {
+              "rank": 38,
+              "raw_score": 14.35605883408816,
+              "weighted_rrf_contribution": 0.01020408163265306
+            },
+            "dense": {
+              "rank": 15,
+              "raw_score": 0.7005489572585587,
+              "weighted_rrf_contribution": 0.013333333333333334
+            },
+            "line_end": 115,
+            "line_start": 112,
+            "local_rerank": {
+              "final_score": 0.31722968572213284,
+              "lexical_coverage": 0.45454545454545453,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.3019723780750971,
+            "path": "SHELL_DETOURS.md",
+            "rank": 10,
+            "relevant": false,
+            "retrieval_score": 0.023537414965986395
+          },
+          {
+            "bm25": {
+              "rank": 44,
+              "raw_score": 14.222922760935154,
+              "weighted_rrf_contribution": 0.009615384615384616
+            },
+            "dense": {
+              "rank": 14,
+              "raw_score": 0.7008583426850423,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "line_end": 19,
+            "line_start": 10,
+            "local_rerank": {
+              "final_score": 0.3076650033032209,
+              "lexical_coverage": 0.6363636363636364,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.2711429329631747,
+            "path": "website/tools.md",
+            "rank": 11,
+            "relevant": false,
+            "retrieval_score": 0.02312889812889813
+          },
+          {
+            "bm25": {
+              "rank": 9,
+              "raw_score": 16.728875549164833,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "dense": {
+              "rank": 53,
+              "raw_score": 0.6767761833208402,
+              "weighted_rrf_contribution": 0.008849557522123894
+            },
+            "line_end": 38,
+            "line_start": 34,
+            "local_rerank": {
+              "final_score": 0.29488730744791364,
+              "lexical_coverage": 0.36363636363636365,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.2872485234269747,
+            "path": "SHELL_DETOURS.md",
+            "rank": 12,
+            "relevant": false,
+            "retrieval_score": 0.0233423111453123
+          },
+          {
+            "bm25": {
+              "rank": 10,
+              "raw_score": 16.728875549164833,
+              "weighted_rrf_contribution": 0.014285714285714285
+            },
+            "dense": {
+              "rank": 54,
+              "raw_score": 0.6767761833208402,
+              "weighted_rrf_contribution": 0.008771929824561403
+            },
+            "line_end": 38,
+            "line_start": 35,
+            "local_rerank": {
+              "final_score": 0.2755526966275891,
+              "lexical_coverage": 0.36363636363636365,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.265765622515503,
+            "path": "SHELL_DETOURS.md",
+            "rank": 13,
+            "relevant": false,
+            "retrieval_score": 0.023057644110275687
+          },
+          {
+            "bm25": {
+              "rank": 39,
+              "raw_score": 14.350420889674671,
+              "weighted_rrf_contribution": 0.010101010101010102
+            },
+            "dense": {
+              "rank": 36,
+              "raw_score": 0.6865137884696386,
+              "weighted_rrf_contribution": 0.010416666666666666
+            },
+            "line_end": 133,
+            "line_start": 127,
+            "local_rerank": {
+              "final_score": 0.12121970269156826,
+              "lexical_coverage": 0.5454545454545454,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.07408249794012635,
+            "path": "website/acp.md",
+            "rank": 14,
+            "relevant": false,
+            "retrieval_score": 0.020517676767676768
+          },
+          {
+            "bm25": {
+              "rank": 57,
+              "raw_score": 13.380892042130604,
+              "weighted_rrf_contribution": 0.008547008547008548
+            },
+            "dense": {
+              "rank": 31,
+              "raw_score": 0.6885896145456861,
+              "weighted_rrf_contribution": 0.01098901098901099
+            },
+            "line_end": 49,
+            "line_start": 45,
+            "local_rerank": {
+              "final_score": 0.045454545454545456,
+              "lexical_coverage": 0.45454545454545453,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.0,
+            "path": "SHELL_DETOURS.md",
+            "rank": 15,
+            "relevant": false,
+            "retrieval_score": 0.019536019536019536
+          },
+          {
+            "bm25": {
+              "rank": 12,
+              "raw_score": 16.20475703851735,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "dense": {
+              "rank": 116,
+              "raw_score": 0.6612250866206488,
+              "weighted_rrf_contribution": 0.005681818181818182
+            },
+            "line_end": 11,
+            "line_start": 7,
+            "local_rerank": {
+              "final_score": 0.020537798681680937,
+              "lexical_coverage": 0.18181818181818182,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.0026177561109586136,
+            "path": "design/shell-write-gate.md",
+            "rank": 16,
+            "relevant": false,
+            "retrieval_score": 0.019570707070707072
+          }
+        ],
+        "retrieval_candidates": [
+          {
+            "bm25": {
+              "rank": 1,
+              "raw_score": 26.017337645373175,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "context": "website/providers.md › Local models (Ollama) › The prompt local models get",
+            "dense": {
+              "rank": 1,
+              "raw_score": 0.7418867669014522,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "line_end": 247,
+            "line_start": 243,
+            "normalized_retrieval_score": 1.0,
+            "path": "website/providers.md",
+            "rank": 1,
+            "relevant": false,
+            "retrieval_score": 0.03278688524590164,
+            "text": "\n- do the work with tools: write files with `write`, change them with `edit`, run commands with the shell tool\n- never paste code into its reply instead of calling a tool\n- treat a big task as normal: work in many steps, one tool call at a time, and never refuse or apologise that a task is too large\n- only say a file changed when a tool reported it\n"
+          },
+          {
+            "bm25": {
+              "rank": 2,
+              "raw_score": 26.017337645373175,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "context": "website/providers.md › Local models (Ollama) › The prompt local models get",
+            "dense": {
+              "rank": 2,
+              "raw_score": 0.7418867669014522,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "line_end": 247,
+            "line_start": 244,
+            "normalized_retrieval_score": 0.96009160900497,
+            "path": "website/providers.md",
+            "rank": 2,
+            "relevant": false,
+            "retrieval_score": 0.03225806451612903,
+            "text": "- do the work with tools: write files with `write`, change them with `edit`, run commands with the shell tool\n- never paste code into its reply instead of calling a tool\n- treat a big task as normal: work in many steps, one tool call at a time, and never refuse or apologise that a task is too large\n- only say a file changed when a tool reported it\n"
+          },
+          {
+            "bm25": {
+              "rank": 8,
+              "raw_score": 18.21712753081716,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "context": "SHELL_DETOURS.md › shell detours",
+            "dense": {
+              "rank": 6,
+              "raw_score": 0.7117390531924622,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "line_end": 5,
+            "line_start": 2,
+            "normalized_retrieval_score": 0.7789210300983892,
+            "path": "SHELL_DETOURS.md",
+            "rank": 3,
+            "relevant": true,
+            "retrieval_score": 0.029857397504456328,
+            "text": "\nhow agentty gets the model to use `read`, `grep`, `list_dir`, `glob` and the\n`git_*` tools instead of `cat`, `sed -n`, `grep -rn`, `ls` and `git log` in\nthe shell. and why it does it with advice, not by rewriting shell calls.\n"
+          },
+          {
+            "bm25": {
+              "rank": 4,
+              "raw_score": 20.780929605475873,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "context": "website/acp.md › What works over ACP",
+            "dense": {
+              "rank": 12,
+              "raw_score": 0.7023991143612934,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "line_end": 134,
+            "line_start": 130,
+            "normalized_retrieval_score": 0.7529975453172204,
+            "path": "website/acp.md",
+            "rank": 4,
+            "relevant": false,
+            "retrieval_score": 0.029513888888888888,
+            "text": "- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). A `read` renders as a gutter-numbered excerpt; other output is markdown-escaped so file contents render verbatim.\n- **Live terminals** — in Zed, a shell command gets a real terminal inside its tool card: output streams in as it runs (colors included) and the card shows the exit code. The command still runs in agentty's own sandbox; only the display is the editor's.\n- **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.\n- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. \"Always\" lasts for the session; a tool you always rejected is refused without asking again.\n- **Slash commands** — `/compact`, `/new`, your own commands from `.agentty/commands` or `.claude/commands` (with their argument hints), and every installed skill as `/<skill-name>`. A command expands into its prompt and a skill loads its instructions before the model sees them, the same as in the TUI; the chat title stays what you typed. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab.\n"
+          },
+          {
+            "bm25": {
+              "rank": 7,
+              "raw_score": 18.34219035942734,
+              "weighted_rrf_contribution": 0.014925373134328358
+            },
+            "context": "website/acp.md › What works over ACP",
+            "dense": {
+              "rank": 9,
+              "raw_score": 0.7078130179441522,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "line_end": 138,
+            "line_start": 133,
+            "normalized_retrieval_score": 0.7457706868259516,
+            "path": "website/acp.md",
+            "rank": 5,
+            "relevant": false,
+            "retrieval_score": 0.029418126757516764,
+            "text": "- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. \"Always\" lasts for the session; a tool you always rejected is refused without asking again.\n- **Slash commands** — `/compact`, `/new`, your own commands from `.agentty/commands` or `.claude/commands` (with their argument hints), and every installed skill as `/<skill-name>`. A command expands into its prompt and a skill loads its instructions before the model sees them, the same as in the TUI; the chat title stays what you typed. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab.\n- **Compaction progress** — editors that render compactions (ACP 1.11) see `/compact` as an entry that streams its summary and ends completed, failed or cancelled. Others get a one-line note in the chat.\n- **Context usage** — after each turn a `usage_update` reports tokens in use and the model's window, for the editor's context meter.\n- **Notices** — editors that render notices (ACP 1.11) get a warning once the context window passes 85%, and the provider's error when a request fails. Notices are never sent to an editor that didn't ask for them.\n- **Live progress for every tool** — a subagent's step-by-step log, a long test run, or a shell in an editor without terminals shows its latest output in the card while it runs.\n"
+          },
+          {
+            "bm25": {
+              "rank": 14,
+              "raw_score": 16.192956687231785,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "context": "agent_panel/07_tool_cards.md › 07 — Tool cards › 5. Per-tool variants › 5.2 Edit",
+            "dense": {
+              "rank": 7,
+              "raw_score": 0.7081057728227412,
+              "weighted_rrf_contribution": 0.014925373134328358
+            },
+            "line_end": 260,
+            "line_start": 256,
+            "normalized_retrieval_score": 0.6718706012681754,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 6,
+            "relevant": false,
+            "retrieval_score": 0.028438886647841874,
+            "text": "\n**Multi-edit (live).** When the model emits the canonical\n`edits: [{old_text, new_text}, ...]` shape, the card renders **every**\nhunk during streaming, not just the first. Each edit gets its own\n`- / +` block with an `edit N/M` separator between them:\n"
+          },
+          {
+            "bm25": {
+              "rank": 5,
+              "raw_score": 19.326364270450984,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "context": "website/acp.md › What works over ACP",
+            "dense": {
+              "rank": 17,
+              "raw_score": 0.6979804795506311,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "line_end": 136,
+            "line_start": 131,
+            "normalized_retrieval_score": 0.6667948365833563,
+            "path": "website/acp.md",
+            "rank": 7,
+            "relevant": false,
+            "retrieval_score": 0.028371628371628373,
+            "text": "- **Live terminals** — in Zed, a shell command gets a real terminal inside its tool card: output streams in as it runs (colors included) and the card shows the exit code. The command still runs in agentty's own sandbox; only the display is the editor's.\n- **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.\n- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. \"Always\" lasts for the session; a tool you always rejected is refused without asking again.\n- **Slash commands** — `/compact`, `/new`, your own commands from `.agentty/commands` or `.claude/commands` (with their argument hints), and every installed skill as `/<skill-name>`. A command expands into its prompt and a skill loads its instructions before the model sees them, the same as in the TUI; the chat title stays what you typed. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab.\n- **Compaction progress** — editors that render compactions (ACP 1.11) see `/compact` as an entry that streams its summary and ends completed, failed or cancelled. Others get a one-line note in the chat.\n- **Context usage** — after each turn a `usage_update` reports tokens in use and the model's window, for the editor's context meter.\n"
+          },
+          {
+            "bm25": {
+              "rank": 15,
+              "raw_score": 16.192956687231785,
+              "weighted_rrf_contribution": 0.013333333333333334
+            },
+            "context": "agent_panel/07_tool_cards.md › 07 — Tool cards › 5. Per-tool variants › 5.2 Edit",
+            "dense": {
+              "rank": 8,
+              "raw_score": 0.7081057728227412,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "line_end": 260,
+            "line_start": 257,
+            "normalized_retrieval_score": 0.6417087257863869,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 8,
+            "relevant": false,
+            "retrieval_score": 0.02803921568627451,
+            "text": "**Multi-edit (live).** When the model emits the canonical\n`edits: [{old_text, new_text}, ...]` shape, the card renders **every**\nhunk during streaming, not just the first. Each edit gets its own\n`- / +` block with an `edit N/M` separator between them:\n"
+          },
+          {
+            "bm25": {
+              "rank": 3,
+              "raw_score": 21.44105172616417,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "context": "agent_panel/07_tool_cards.md › 07 — Tool cards › 1. The shared shell",
+            "dense": {
+              "rank": 29,
+              "raw_score": 0.6907260345563924,
+              "weighted_rrf_contribution": 0.011235955056179775
+            },
+            "line_end": 73,
+            "line_start": 70,
+            "normalized_retrieval_score": 0.5715061611052648,
+            "path": "agent_panel/07_tool_cards.md",
+            "rank": 9,
+            "relevant": false,
+            "retrieval_score": 0.027108970929195647,
+            "text": "\nFor per-tool variants (Edit, Bash, Read, …), use the typed widgets\ninstead of `ToolCall`. They produce the same shell but render a\ntool-specific body.\n"
+          },
+          {
+            "bm25": {
+              "rank": 38,
+              "raw_score": 14.35605883408816,
+              "weighted_rrf_contribution": 0.01020408163265306
+            },
+            "context": "SHELL_DETOURS.md › shell detours › the design (sep 16, hardened sep 24) › 3. the tip names the exact parameter",
+            "dense": {
+              "rank": 15,
+              "raw_score": 0.7005489572585587,
+              "weighted_rrf_contribution": 0.013333333333333334
+            },
+            "line_end": 115,
+            "line_start": 112,
+            "normalized_retrieval_score": 0.3019723780750971,
+            "path": "SHELL_DETOURS.md",
+            "rank": 10,
+            "relevant": false,
+            "retrieval_score": 0.023537414965986395,
+            "text": "\nthe shell always runs. after it finishes, `bash_tool_suggestion` puts one\nline in front of the output. it names the tool and the parameter read off\nthe model's own command:\n"
+          },
+          {
+            "bm25": {
+              "rank": 9,
+              "raw_score": 16.728875549164833,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "context": "SHELL_DETOURS.md › shell detours › the problem, measured",
+            "dense": {
+              "rank": 53,
+              "raw_score": 0.6767761833208402,
+              "weighted_rrf_contribution": 0.008849557522123894
+            },
+            "line_end": 38,
+            "line_start": 34,
+            "normalized_retrieval_score": 0.2872485234269747,
+            "path": "SHELL_DETOURS.md",
+            "rank": 11,
+            "relevant": false,
+            "retrieval_score": 0.0233423111453123,
+            "text": "\nclaude code has the same problem. its prompt says \"do NOT use bash to\nrun commands when a relevant dedicated tool is provided\", and there are\nopen issues where the model uses `cat`/`grep` anyway (anthropics/claude-code\n#21696, #39979).\n"
+          },
+          {
+            "bm25": {
+              "rank": 44,
+              "raw_score": 14.222922760935154,
+              "weighted_rrf_contribution": 0.009615384615384616
+            },
+            "context": "website/tools.md",
+            "dense": {
+              "rank": 14,
+              "raw_score": 0.7008583426850423,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "line_end": 19,
+            "line_start": 10,
+            "normalized_retrieval_score": 0.2711429329631747,
+            "path": "website/tools.md",
+            "rank": 12,
+            "relevant": false,
+            "retrieval_score": 0.02312889812889813,
+            "text": "\n| Tool | Effect class | Description |\n|---|---|---|\n| `read` | Read | Read a file (or a line range). Large files return a symbol outline first. **`symbol=\"name\"`** reads exactly one function/type's definition + body (resolved to its enclosing block) — no line math or `sed`. An image (PNG, JPEG, GIF or WebP, up to 8 MiB, detected by its contents, not its extension) is attached for a vision model to see. If the provider can't take it, agentty drops it and retries the turn. |\n| `write` | Write | Create a new file with atomic write semantics. |\n| `edit` | Write | Apply targeted text substitutions to an existing file; renders a diff. |\n| `move` | Write | Move or rename a file/directory without a shell. |\n| `remove` | Write | Delete a file or directory (recursive requires an explicit flag). A path that's already gone counts as done, not as an error. |\n| `bash` | Shell | Run a shell command inside the sandbox; shows exit code + output. |\n| `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. Rendered as terminal output — tail-anchored, exit codes and test/compiler summaries lifted out. |\n"
+          },
+          {
+            "bm25": {
+              "rank": 10,
+              "raw_score": 16.728875549164833,
+              "weighted_rrf_contribution": 0.014285714285714285
+            },
+            "context": "SHELL_DETOURS.md › shell detours › the problem, measured",
+            "dense": {
+              "rank": 54,
+              "raw_score": 0.6767761833208402,
+              "weighted_rrf_contribution": 0.008771929824561403
+            },
+            "line_end": 38,
+            "line_start": 35,
+            "normalized_retrieval_score": 0.265765622515503,
+            "path": "SHELL_DETOURS.md",
+            "rank": 13,
+            "relevant": false,
+            "retrieval_score": 0.023057644110275687,
+            "text": "claude code has the same problem. its prompt says \"do NOT use bash to\nrun commands when a relevant dedicated tool is provided\", and there are\nopen issues where the model uses `cat`/`grep` anyway (anthropics/claude-code\n#21696, #39979).\n"
+          },
+          {
+            "bm25": {
+              "rank": 39,
+              "raw_score": 14.350420889674671,
+              "weighted_rrf_contribution": 0.010101010101010102
+            },
+            "context": "website/acp.md › What works over ACP",
+            "dense": {
+              "rank": 36,
+              "raw_score": 0.6865137884696386,
+              "weighted_rrf_contribution": 0.010416666666666666
+            },
+            "line_end": 133,
+            "line_start": 127,
+            "normalized_retrieval_score": 0.07408249794012635,
+            "path": "website/acp.md",
+            "rank": 14,
+            "relevant": false,
+            "retrieval_score": 0.020517676767676768,
+            "text": "\n- **Streaming text and thinking** — the reply renders token by token, and the model's reasoning streams as a collapsible thought when thinking is on. Signed thinking blocks are kept, so Claude tool turns with thinking work over ACP.\n- **Images in prompts** — paste or attach a screenshot and it reaches the model as an image. A text-only model has the image withheld rather than the turn failed. Audio is not advertised; no provider agentty ships accepts it.\n- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). A `read` renders as a gutter-numbered excerpt; other output is markdown-escaped so file contents render verbatim.\n- **Live terminals** — in Zed, a shell command gets a real terminal inside its tool card: output streams in as it runs (colors included) and the card shows the exit code. The command still runs in agentty's own sandbox; only the display is the editor's.\n- **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.\n- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. \"Always\" lasts for the session; a tool you always rejected is refused without asking again.\n"
+          },
+          {
+            "bm25": {
+              "rank": 12,
+              "raw_score": 16.20475703851735,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "context": "design/shell-write-gate.md › The shell write-gate hole — research notes › The hole",
+            "dense": {
+              "rank": 116,
+              "raw_score": 0.6612250866206488,
+              "weighted_rrf_contribution": 0.005681818181818182
+            },
+            "line_end": 11,
+            "line_start": 7,
+            "normalized_retrieval_score": 0.0026177561109586136,
+            "path": "design/shell-write-gate.md",
+            "rank": 15,
+            "relevant": false,
+            "retrieval_score": 0.019570707070707072,
+            "text": "\n```cpp\nif (tool_name == \"write\" || tool_name == \"edit\" ||\n    tool_name == \"apply_patch\" || tool_name == \"move\") { … }\n```\n"
+          },
+          {
+            "bm25": {
+              "rank": 57,
+              "raw_score": 13.380892042130604,
+              "weighted_rrf_contribution": 0.008547008547008548
+            },
+            "context": "SHELL_DETOURS.md › shell detours › the design (sep 16, hardened sep 24) › 1. the prompt names the parameter",
+            "dense": {
+              "rank": 31,
+              "raw_score": 0.6885896145456861,
+              "weighted_rrf_contribution": 0.01098901098901099
+            },
+            "line_end": 49,
+            "line_start": 45,
+            "normalized_retrieval_score": 0.0,
+            "path": "SHELL_DETOURS.md",
+            "rank": 16,
+            "relevant": false,
+            "retrieval_score": 0.019536019536019536,
+            "text": "\n\"prefer the dedicated tools\" is advice the model already agrees with and\nthen ignores. it pipes to `head` because it doesn't believe the tool can\nbound itself. so the `<shell>` section names the exact replacement for each\nidiom:\n"
+          }
+        ],
+        "retrieval_mode": "hybrid"
+      },
+      "q": "the model writes files with shell commands instead of the edit tool",
+      "ranks": {
+        "bm25_only": 8,
+        "dense_only": 6,
+        "local_rerank": 4,
+        "retrieval": 3
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "lost",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "degraded",
+        "retrieval_vs_dense": "recovered"
+      },
+      "q": "paste an image from my laptop into agentty over ssh",
+      "ranks": {
+        "bm25_only": 3,
+        "dense_only": 0,
+        "local_rerank": 6,
+        "retrieval": 6
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "improved",
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "unchanged"
+      },
+      "q": "use a local model through ollama",
+      "ranks": {
+        "bm25_only": 6,
+        "dense_only": 2,
+        "local_rerank": 3,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "degraded",
+        "retrieval_vs_bm25": "improved",
+        "retrieval_vs_dense": "improved"
+      },
+      "diagnostic": {
+        "gold": [
+          {
+            "line_end": 24,
+            "line_start": 9,
+            "path": "website/acp.md"
+          },
+          {
+            "line_end": 10,
+            "line_start": 1,
+            "path": "acp-editor-integration.md"
+          },
+          {
+            "line_end": 31,
+            "line_start": 13,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md"
+          },
+          {
+            "line_end": 68,
+            "line_start": 56,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md"
+          }
+        ],
+        "local_rerank_candidates": [
+          {
+            "bm25": {
+              "rank": 9,
+              "raw_score": 14.449222243267721,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "dense": {
+              "rank": 2,
+              "raw_score": 0.8087188271568507,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "line_end": 247,
+            "line_start": 244,
+            "local_rerank": {
+              "final_score": 0.9343184028368582,
+              "lexical_coverage": 0.5714285714285714,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.9746394952155567,
+            "path": "website/acp.md",
+            "rank": 1,
+            "relevant": false,
+            "retrieval_score": 0.030621785881252923
+          },
+          {
+            "bm25": {
+              "rank": 4,
+              "raw_score": 16.305743447977676,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "dense": {
+              "rank": 6,
+              "raw_score": 0.8034183555254507,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "line_end": 59,
+            "line_start": 57,
+            "local_rerank": {
+              "final_score": 0.9285714285714286,
+              "lexical_coverage": 0.2857142857142857,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 1.0,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 2,
+            "relevant": true,
+            "retrieval_score": 0.030776515151515152
+          },
+          {
+            "bm25": {
+              "rank": 1,
+              "raw_score": 16.68789291127899,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "dense": {
+              "rank": 17,
+              "raw_score": 0.7957777188748434,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "line_end": 19,
+            "line_start": 17,
+            "local_rerank": {
+              "final_score": 0.7797784782191022,
+              "lexical_coverage": 0.8571428571428571,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.7711824361164626,
+            "path": "website/content/blog/agentty-0-2-12-acp-and-retrieval.md",
+            "rank": 3,
+            "relevant": false,
+            "retrieval_score": 0.02938045560996381
+          },
+          {
+            "bm25": {
+              "rank": 2,
+              "raw_score": 16.606018732065817,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "dense": {
+              "rank": 18,
+              "raw_score": 0.794629632236337,
+              "weighted_rrf_contribution": 0.01282051282051282
+            },
+            "line_end": 68,
+            "line_start": 64,
+            "local_rerank": {
+              "final_score": 0.6733567769759742,
+              "lexical_coverage": 0.42857142857142855,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.7005551490209238,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 4,
+            "relevant": true,
+            "retrieval_score": 0.028949545078577336
+          },
+          {
+            "bm25": {
+              "rank": 3,
+              "raw_score": 16.606018732065817,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "dense": {
+              "rank": 19,
+              "raw_score": 0.794629632236337,
+              "weighted_rrf_contribution": 0.012658227848101266
+            },
+            "line_end": 68,
+            "line_start": 65,
+            "local_rerank": {
+              "final_score": 0.6116522255145281,
+              "lexical_coverage": 0.42857142857142855,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.6319945362859837,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 5,
+            "relevant": true,
+            "retrieval_score": 0.028531243721117136
+          },
+          {
+            "bm25": {
+              "rank": 20,
+              "raw_score": 13.266013228391863,
+              "weighted_rrf_contribution": 0.0125
+            },
+            "dense": {
+              "rank": 3,
+              "raw_score": 0.8071297168948862,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "line_end": 15,
+            "line_start": 12,
+            "local_rerank": {
+              "final_score": 0.6025974025974025,
+              "lexical_coverage": 0.5714285714285714,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.6060606060606059,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 6,
+            "relevant": true,
+            "retrieval_score": 0.028373015873015873
+          },
+          {
+            "bm25": {
+              "rank": 8,
+              "raw_score": 14.521351803492347,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "dense": {
+              "rank": 14,
+              "raw_score": 0.79696602052149,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "line_end": 253,
+            "line_start": 250,
+            "local_rerank": {
+              "final_score": 0.5656508639291996,
+              "lexical_coverage": 0.42857142857142855,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.5808819123022853,
+            "path": "website/acp.md",
+            "rank": 7,
+            "relevant": false,
+            "retrieval_score": 0.02821939586645469
+          },
+          {
+            "bm25": {
+              "rank": 11,
+              "raw_score": 14.34472763569062,
+              "weighted_rrf_contribution": 0.014084507042253521
+            },
+            "dense": {
+              "rank": 13,
+              "raw_score": 0.7993123638453146,
+              "weighted_rrf_contribution": 0.0136986301369863
+            },
+            "line_end": 54,
+            "line_start": 42,
+            "local_rerank": {
+              "final_score": 0.5298688159085424,
+              "lexical_coverage": 0.7142857142857143,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.50937804942219,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 8,
+            "relevant": false,
+            "retrieval_score": 0.027783137179239824
+          },
+          {
+            "bm25": {
+              "rank": 17,
+              "raw_score": 13.506801488622862,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "dense": {
+              "rank": 8,
+              "raw_score": 0.8020710501403456,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "line_end": 39,
+            "line_start": 36,
+            "local_rerank": {
+              "final_score": 0.48798561553224395,
+              "lexical_coverage": 0.42857142857142855,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.4945871918612234,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 9,
+            "relevant": false,
+            "retrieval_score": 0.027692895339954164
+          },
+          {
+            "bm25": {
+              "rank": 22,
+              "raw_score": 13.120483053598576,
+              "weighted_rrf_contribution": 0.012195121951219513
+            },
+            "dense": {
+              "rank": 5,
+              "raw_score": 0.8064440240963602,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "line_end": 15,
+            "line_start": 10,
+            "local_rerank": {
+              "final_score": 0.4855791442347065,
+              "lexical_coverage": 0.5714285714285714,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.4760403189909437,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 10,
+            "relevant": true,
+            "retrieval_score": 0.027579737335834898
+          },
+          {
+            "bm25": {
+              "rank": 33,
+              "raw_score": 12.652387939444097,
+              "weighted_rrf_contribution": 0.010752688172043012
+            },
+            "dense": {
+              "rank": 1,
+              "raw_score": 0.8132044163735531,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "line_end": 7,
+            "line_start": 4,
+            "local_rerank": {
+              "final_score": 0.42161689157600485,
+              "lexical_coverage": 0.5714285714285714,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.4049711493701641,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 11,
+            "relevant": false,
+            "retrieval_score": 0.027146130794993832
+          },
+          {
+            "bm25": {
+              "rank": 5,
+              "raw_score": 15.75755122199601,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "dense": {
+              "rank": 24,
+              "raw_score": 0.7849282909416598,
+              "weighted_rrf_contribution": 0.011904761904761904
+            },
+            "line_end": 56,
+            "line_start": 56,
+            "local_rerank": {
+              "final_score": 0.4141760678346043,
+              "lexical_coverage": 0.2857142857142857,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.4284495991813064,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 12,
+            "relevant": true,
+            "retrieval_score": 0.02728937728937729
+          },
+          {
+            "bm25": {
+              "rank": 42,
+              "raw_score": 12.419028601930004,
+              "weighted_rrf_contribution": 0.00980392156862745
+            },
+            "dense": {
+              "rank": 4,
+              "raw_score": 0.8068540303169941,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "line_end": 9,
+            "line_start": 9,
+            "local_rerank": {
+              "final_score": 0.15402187482531796,
+              "lexical_coverage": 0.42857142857142855,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.12351636885352789,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 13,
+            "relevant": false,
+            "retrieval_score": 0.02542892156862745
+          },
+          {
+            "bm25": {
+              "rank": 28,
+              "raw_score": 12.860087421180813,
+              "weighted_rrf_contribution": 0.011363636363636364
+            },
+            "dense": {
+              "rank": 12,
+              "raw_score": 0.7998874490816644,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "line_end": 7,
+            "line_start": 1,
+            "local_rerank": {
+              "final_score": 0.1422869813113713,
+              "lexical_coverage": 0.5714285714285714,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.09460458240946018,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 14,
+            "relevant": false,
+            "retrieval_score": 0.025252525252525252
+          },
+          {
+            "bm25": {
+              "rank": 37,
+              "raw_score": 12.506661802958892,
+              "weighted_rrf_contribution": 0.010309278350515464
+            },
+            "dense": {
+              "rank": 9,
+              "raw_score": 0.8015294005216238,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "line_end": 20,
+            "line_start": 16,
+            "local_rerank": {
+              "final_score": 0.032976586007601116,
+              "lexical_coverage": 0.14285714285714285,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.02076763524654092,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 15,
+            "relevant": true,
+            "retrieval_score": 0.02480203197370387
+          },
+          {
+            "bm25": {
+              "rank": 6,
+              "raw_score": 15.426564802543592,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "dense": {
+              "rank": 45,
+              "raw_score": 0.7711209685469534,
+              "weighted_rrf_contribution": 0.009523809523809525
+            },
+            "line_end": 63,
+            "line_start": 60,
+            "local_rerank": {
+              "final_score": 0.014285714285714285,
+              "lexical_coverage": 0.14285714285714285,
+              "model_score": null
+            },
+            "normalized_retrieval_score": 0.0,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 16,
+            "relevant": true,
+            "retrieval_score": 0.024675324675324677
+          }
+        ],
+        "retrieval_candidates": [
+          {
+            "bm25": {
+              "rank": 4,
+              "raw_score": 16.305743447977676,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › One-command Zed over an air-gap",
+            "dense": {
+              "rank": 6,
+              "raw_score": 0.8034183555254507,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "line_end": 59,
+            "line_start": 57,
+            "normalized_retrieval_score": 1.0,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 1,
+            "relevant": true,
+            "retrieval_score": 0.030776515151515152,
+            "text": "\nIf the box you want to run on has no direct internet, let agentty assemble the\nconfig for you:\n"
+          },
+          {
+            "bm25": {
+              "rank": 9,
+              "raw_score": 14.449222243267721,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "context": "website/acp.md › agentty-in-Zed on an air-gapped remote › Wire it into Zed (one paste)",
+            "dense": {
+              "rank": 2,
+              "raw_score": 0.8087188271568507,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "line_end": 247,
+            "line_start": 244,
+            "normalized_retrieval_score": 0.9746394952155567,
+            "path": "website/acp.md",
+            "rank": 2,
+            "relevant": false,
+            "retrieval_score": 0.030621785881252923,
+            "text": "\n1. Open Zed's settings: `cmd-,` (macOS) or `ctrl-,` (Linux).\n2. Paste the printed `\"agent_servers\"` block into the JSON. If you already have an `agent_servers` object, merge the `\"agentty (airgap)\"` key into it.\n3. Save.\n"
+          },
+          {
+            "bm25": {
+              "rank": 1,
+              "raw_score": 16.68789291127899,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "context": "website/content/blog/agentty-0-2-12-acp-and-retrieval.md › agentty 0.2.12 › ACP: agentty now looks native inside Zed",
+            "dense": {
+              "rank": 17,
+              "raw_score": 0.7957777188748434,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "line_end": 19,
+            "line_start": 17,
+            "normalized_retrieval_score": 0.7711824361164626,
+            "path": "website/content/blog/agentty-0-2-12-acp-and-retrieval.md",
+            "rank": 3,
+            "relevant": false,
+            "retrieval_score": 0.02938045560996381,
+            "text": "\nRunning agentty as an [ACP](/docs/acp) agent used to feel like a\nsecond-class citizen next to Zed's own agent. Four gaps closed:\n"
+          },
+          {
+            "bm25": {
+              "rank": 2,
+              "raw_score": 16.606018732065817,
+              "weighted_rrf_contribution": 0.016129032258064516
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › One-command Zed over an air-gap",
+            "dense": {
+              "rank": 18,
+              "raw_score": 0.794629632236337,
+              "weighted_rrf_contribution": 0.01282051282051282
+            },
+            "line_end": 68,
+            "line_start": 64,
+            "normalized_retrieval_score": 0.7005551490209238,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 4,
+            "relevant": true,
+            "retrieval_score": 0.028949545078577336,
+            "text": "\nIt prints a ready-to-paste Zed `agent_servers` entry whose `command` is `ssh`\nitself — one ssh process is the reverse SOCKS5 tunnel, the remote agent, and the\nJSON-RPC transport, all at once. Zed owns its lifecycle, so there's nothing to\nbabysit.\n"
+          },
+          {
+            "bm25": {
+              "rank": 3,
+              "raw_score": 16.606018732065817,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › One-command Zed over an air-gap",
+            "dense": {
+              "rank": 19,
+              "raw_score": 0.794629632236337,
+              "weighted_rrf_contribution": 0.012658227848101266
+            },
+            "line_end": 68,
+            "line_start": 65,
+            "normalized_retrieval_score": 0.6319945362859837,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 5,
+            "relevant": true,
+            "retrieval_score": 0.028531243721117136,
+            "text": "It prints a ready-to-paste Zed `agent_servers` entry whose `command` is `ssh`\nitself — one ssh process is the reverse SOCKS5 tunnel, the remote agent, and the\nJSON-RPC transport, all at once. Zed owns its lifecycle, so there's nothing to\nbabysit.\n"
+          },
+          {
+            "bm25": {
+              "rank": 20,
+              "raw_score": 13.266013228391863,
+              "weighted_rrf_contribution": 0.0125
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed",
+            "dense": {
+              "rank": 3,
+              "raw_score": 0.8071297168948862,
+              "weighted_rrf_contribution": 0.015873015873015872
+            },
+            "line_end": 15,
+            "line_start": 12,
+            "normalized_retrieval_score": 0.6060606060606059,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 6,
+            "relevant": true,
+            "retrieval_score": 0.028373015873015873,
+            "text": "in your terminal. **0.2.0** keeps that, and adds a second front door — the\n[Agent Client Protocol](https://agentclientprotocol.com), the same protocol Zed\nuses to drive Claude Code and Gemini. Point Zed at `agentty acp` and your\nterminal agent becomes a first-class agent panel inside the editor.\n"
+          },
+          {
+            "bm25": {
+              "rank": 8,
+              "raw_score": 14.521351803492347,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "context": "website/acp.md › agentty-in-Zed on an air-gapped remote › Use it",
+            "dense": {
+              "rank": 14,
+              "raw_score": 0.79696602052149,
+              "weighted_rrf_contribution": 0.013513513513513514
+            },
+            "line_end": 253,
+            "line_start": 250,
+            "normalized_retrieval_score": 0.5808819123022853,
+            "path": "website/acp.md",
+            "rank": 7,
+            "relevant": false,
+            "retrieval_score": 0.02821939586645469,
+            "text": "\n1. Open the agent panel in Zed: `cmd-?` / `ctrl-?`.\n2. From the agent picker, pick **agentty (airgap)**.\n3. Prompt.\n"
+          },
+          {
+            "bm25": {
+              "rank": 11,
+              "raw_score": 14.34472763569062,
+              "weighted_rrf_contribution": 0.014084507042253521
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › What you get",
+            "dense": {
+              "rank": 13,
+              "raw_score": 0.7993123638453146,
+              "weighted_rrf_contribution": 0.0136986301369863
+            },
+            "line_end": 54,
+            "line_start": 42,
+            "normalized_retrieval_score": 0.50937804942219,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 8,
+            "relevant": false,
+            "retrieval_score": 0.027783137179239824,
+            "text": "\n- **Streaming text** renders token-by-token in Zed's panel.\n- **Tool cards** for every `read` / `edit` / `bash` / `grep`, with live status.\n- **Inline diffs** — `write` and `edit` emit ACP `diff` content, so Zed renders\n  the change in place.\n- **Follow-along** — tool calls carry the file path as an ACP `location`, so Zed\n  opens and highlights the file the agent is touching.\n- **Native permission prompts** before any side-effecting tool runs. The\n  `--profile {ask|minimal|write}` flag tunes exactly which tools prompt.\n- **Session persistence + reload** — sessions are written to the same on-disk\n  thread store the TUI uses, so Zed can `session/load` and replay a full\n  conversation. Threads started in Zed show up in the standalone TUI's picker,\n  and vice versa.\n"
+          },
+          {
+            "bm25": {
+              "rank": 17,
+              "raw_score": 13.506801488622862,
+              "weighted_rrf_contribution": 0.012987012987012988
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › Set it up",
+            "dense": {
+              "rank": 8,
+              "raw_score": 0.8020710501403456,
+              "weighted_rrf_contribution": 0.014705882352941176
+            },
+            "line_end": 39,
+            "line_start": 36,
+            "normalized_retrieval_score": 0.4945871918612234,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 9,
+            "relevant": false,
+            "retrieval_score": 0.027692895339954164,
+            "text": "\nOpen the agent panel, pick **agentty**, and prompt. Auth is whatever\n`agentty login` already wrote to `~/.agentty/credentials/credentials.json` — nothing\nextra to configure.\n"
+          },
+          {
+            "bm25": {
+              "rank": 22,
+              "raw_score": 13.120483053598576,
+              "weighted_rrf_contribution": 0.012195121951219513
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed",
+            "dense": {
+              "rank": 5,
+              "raw_score": 0.8064440240963602,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "line_end": 15,
+            "line_start": 10,
+            "normalized_retrieval_score": 0.4760403189909437,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 10,
+            "relevant": true,
+            "retrieval_score": 0.027579737335834898,
+            "text": "\nagentty has always been one thing: a fast, single-binary Claude agent that lives\nin your terminal. **0.2.0** keeps that, and adds a second front door — the\n[Agent Client Protocol](https://agentclientprotocol.com), the same protocol Zed\nuses to drive Claude Code and Gemini. Point Zed at `agentty acp` and your\nterminal agent becomes a first-class agent panel inside the editor.\n"
+          },
+          {
+            "bm25": {
+              "rank": 5,
+              "raw_score": 15.75755122199601,
+              "weighted_rrf_contribution": 0.015384615384615385
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › One-command Zed over an air-gap",
+            "dense": {
+              "rank": 24,
+              "raw_score": 0.7849282909416598,
+              "weighted_rrf_contribution": 0.011904761904761904
+            },
+            "line_end": 56,
+            "line_start": 56,
+            "normalized_retrieval_score": 0.4284495991813064,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 11,
+            "relevant": true,
+            "retrieval_score": 0.02728937728937729,
+            "text": "## One-command Zed over an air-gap\n"
+          },
+          {
+            "bm25": {
+              "rank": 33,
+              "raw_score": 12.652387939444097,
+              "weighted_rrf_contribution": 0.010752688172043012
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "dense": {
+              "rank": 1,
+              "raw_score": 0.8132044163735531,
+              "weighted_rrf_contribution": 0.01639344262295082
+            },
+            "line_end": 7,
+            "line_start": 4,
+            "normalized_retrieval_score": 0.4049711493701641,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 12,
+            "relevant": false,
+            "retrieval_score": 0.027146130794993832,
+            "text": "author: agentty\ntags: [release, acp, zed]\nexcerpt: \"0.2.0 teaches agentty to speak the Agent Client Protocol, so the same engine that drives the TUI now drives a first-class agent panel inside Zed — streaming text, inline diffs, native permission prompts, and session reload.\"\n---\n"
+          },
+          {
+            "bm25": {
+              "rank": 42,
+              "raw_score": 12.419028601930004,
+              "weighted_rrf_contribution": 0.00980392156862745
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed",
+            "dense": {
+              "rank": 4,
+              "raw_score": 0.8068540303169941,
+              "weighted_rrf_contribution": 0.015625
+            },
+            "line_end": 9,
+            "line_start": 9,
+            "normalized_retrieval_score": 0.12351636885352789,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 13,
+            "relevant": false,
+            "retrieval_score": 0.02542892156862745,
+            "text": "# agentty 0.2.0 — run your terminal agent inside Zed\n"
+          },
+          {
+            "bm25": {
+              "rank": 28,
+              "raw_score": 12.860087421180813,
+              "weighted_rrf_contribution": 0.011363636363636364
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "dense": {
+              "rank": 12,
+              "raw_score": 0.7998874490816644,
+              "weighted_rrf_contribution": 0.013888888888888888
+            },
+            "line_end": 7,
+            "line_start": 1,
+            "normalized_retrieval_score": 0.09460458240946018,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 14,
+            "relevant": false,
+            "retrieval_score": 0.025252525252525252,
+            "text": "---\ntitle: \"agentty 0.2.0 — run your terminal agent inside Zed\"\ndate: 2026-06-06\nauthor: agentty\ntags: [release, acp, zed]\nexcerpt: \"0.2.0 teaches agentty to speak the Agent Client Protocol, so the same engine that drives the TUI now drives a first-class agent panel inside Zed — streaming text, inline diffs, native permission prompts, and session reload.\"\n---\n"
+          },
+          {
+            "bm25": {
+              "rank": 37,
+              "raw_score": 12.506661802958892,
+              "weighted_rrf_contribution": 0.010309278350515464
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed",
+            "dense": {
+              "rank": 9,
+              "raw_score": 0.8015294005216238,
+              "weighted_rrf_contribution": 0.014492753623188406
+            },
+            "line_end": 20,
+            "line_start": 16,
+            "normalized_retrieval_score": 0.02076763524654092,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 15,
+            "relevant": true,
+            "retrieval_score": 0.02480203197370387,
+            "text": "\nThe important part: it's the **same engine**. Same provider, same tool registry,\nsame wire-message shaping, same permission policy — just driven over newline-\ndelimited JSON-RPC on stdio instead of a TUI. There is no second codebase to\nkeep honest.\n"
+          },
+          {
+            "bm25": {
+              "rank": 6,
+              "raw_score": 15.426564802543592,
+              "weighted_rrf_contribution": 0.015151515151515152
+            },
+            "context": "website/content/blog/agentty-0-2-0-zed-acp.md › agentty 0.2.0 — run your terminal agent inside Zed › One-command Zed over an air-gap",
+            "dense": {
+              "rank": 45,
+              "raw_score": 0.7711209685469534,
+              "weighted_rrf_contribution": 0.009523809523809525
+            },
+            "line_end": 63,
+            "line_start": 60,
+            "normalized_retrieval_score": 0.0,
+            "path": "website/content/blog/agentty-0-2-0-zed-acp.md",
+            "rank": 16,
+            "relevant": true,
+            "retrieval_score": 0.024675324675324677,
+            "text": "\n```\nagentty airgap <host> --acp [flags…]\n```\n"
+          }
+        ],
+        "retrieval_mode": "hybrid"
+      },
+      "q": "connect agentty to zed as an agent",
+      "ranks": {
+        "bm25_only": 2,
+        "dense_only": 3,
+        "local_rerank": 2,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": "degraded",
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": "improved"
+      },
+      "q": "add an mcp server",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": 2,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    }
+  ],
+  "dataset": {
+    "bm25_index": {
+      "avg_doc_len": 87.46345712975699,
+      "postings": 415266,
+      "vocabulary": 11506
+    },
+    "cases": 30,
+    "chunker_identity": "chunker-v1",
+    "chunks": 10905,
+    "docs_root": "eval/agentty_docs_4205c612/docs",
+    "judgments_path": "eval/agentty_docs_4205c612/judgments/main.passages.json",
+    "tokenizer_identity": "technical-tokenizer-v2-bounded-symbolic-atoms"
+  },
+  "run": {
+    "build_ms": 2024.785952,
+    "candidate_k": 16,
+    "dense_queries": 30,
+    "dense_ready": true,
+    "embed_model": "nomic-embed-text:latest",
+    "fusion": {
+      "bm25_weight": 1.0,
+      "dense_weight": 1.0,
+      "method": "rrf",
+      "rrf_k": 60.0
+    },
+    "generated_at_unix_ms": 1794393075096,
+    "hybrid_queries": 30,
+    "label": "tokenizer-m2b2-nomic-main-diagnostics"
+  },
+  "schema_version": 1,
+  "stages": {
+    "bm25_only": {
+      "candidate_recall": {
+        "hits": 23,
+        "k": 16,
+        "score": 0.7666666666666667
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 13,
+        "score": 0.43333333333333335
+      },
+      "hit_at_4": {
+        "hits": 17,
+        "score": 0.5666666666666667
+      },
+      "mean_ms_per_query": 1.6954832999999998,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 15.226190476190476,
+        "score": 0.5075396825396825
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.582329781155728,
+        "score": 0.5527443260385243
+      },
+      "recall_at_10": {
+        "hits": 21,
+        "score": 0.7
+      }
+    },
+    "dense_only": {
+      "available": true,
+      "candidate_recall": {
+        "hits": 24,
+        "k": 16,
+        "score": 0.8
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 6,
+        "score": 0.2
+      },
+      "hit_at_4": {
+        "hits": 14,
+        "score": 0.4666666666666667
+      },
+      "mean_ms_per_query": 787.4346998999998,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 10.041666666666664,
+        "score": 0.33472222222222214
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 12.82235142660722,
+        "score": 0.42741171422024066
+      },
+      "recall_at_10": {
+        "hits": 22,
+        "score": 0.7333333333333333
+      }
+    },
+    "local_rerank": {
+      "candidate_recall": {
+        "hits": 24,
+        "k": 16,
+        "score": 0.8
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 11,
+        "score": 0.36666666666666664
+      },
+      "hit_at_4": {
+        "hits": 18,
+        "score": 0.6
+      },
+      "mean_ms_per_query": 102.86428846666668,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 14.646825396825395,
+        "score": 0.4882275132275132
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.634506608905916,
+        "score": 0.5544835536301972
+      },
+      "recall_at_10": {
+        "hits": 23,
+        "score": 0.7666666666666667
+      }
+    },
+    "retrieval": {
+      "candidate_recall": {
+        "hits": 24,
+        "k": 16,
+        "score": 0.8
+      },
+      "cases": 30,
+      "hit_at_1": {
+        "hits": 11,
+        "score": 0.36666666666666664
+      },
+      "hit_at_4": {
+        "hits": 18,
+        "score": 0.6
+      },
+      "mean_ms_per_query": 101.91409723333332,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 14.896825396825395,
+        "score": 0.49656084656084654
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 16.83475980440398,
+        "score": 0.5611586601467994
+      },
+      "recall_at_10": {
+        "hits": 23,
+        "score": 0.7666666666666667
+      }
+    }
+  },
+  "transitions": {
+    "dense_vs_bm25": {
+      "degraded": 9,
+      "improved": 4,
+      "lost": 3,
+      "recovered": 4,
+      "unchanged": 10
+    },
+    "rerank_vs_retrieval": {
+      "degraded": 4,
+      "improved": 3,
+      "unchanged": 23
+    },
+    "retrieval_vs_bm25": {
+      "degraded": 6,
+      "improved": 7,
+      "lost": 2,
+      "recovered": 3,
+      "unchanged": 12
+    },
+    "retrieval_vs_dense": {
+      "degraded": 3,
+      "improved": 12,
+      "lost": 1,
+      "recovered": 1,
+      "unchanged": 13
+    }
+  }
+}

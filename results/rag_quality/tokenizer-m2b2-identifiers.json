@@ -1,0 +1,271 @@
+{
+  "cases": [
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "icon name alert circle",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "cache id builder",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "cancel token ptr",
+      "ranks": {
+        "bm25_only": 3,
+        "dense_only": null,
+        "local_rerank": 3,
+        "retrieval": 3
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "model capabilities effort set",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "agent status running",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "some widget config",
+      "ranks": {
+        "bm25_only": 2,
+        "dense_only": null,
+        "local_rerank": 2,
+        "retrieval": 2
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "AGENTTY_RAG_BM25_WEIGHT",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "ModelCapabilities::extended_context_1m",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    },
+    {
+      "changes": {
+        "dense_vs_bm25": null,
+        "rerank_vs_retrieval": "unchanged",
+        "retrieval_vs_bm25": "unchanged",
+        "retrieval_vs_dense": null
+      },
+      "q": "run-ai-coding-agent-locally-with-ollama",
+      "ranks": {
+        "bm25_only": 1,
+        "dense_only": null,
+        "local_rerank": 1,
+        "retrieval": 1
+      }
+    }
+  ],
+  "dataset": {
+    "bm25_index": {
+      "avg_doc_len": 87.46345712975699,
+      "postings": 415266,
+      "vocabulary": 11506
+    },
+    "cases": 9,
+    "chunker_identity": "chunker-v1",
+    "chunks": 10905,
+    "docs_root": "eval/agentty_docs_4205c612/docs",
+    "judgments_path": "eval/agentty_docs_4205c612/judgments/identifiers.passages.json",
+    "tokenizer_identity": "technical-tokenizer-v2-bounded-symbolic-atoms"
+  },
+  "run": {
+    "build_ms": 2117.991561,
+    "candidate_k": 16,
+    "dense_queries": 0,
+    "dense_ready": false,
+    "embed_model": "",
+    "fusion": {
+      "bm25_weight": 1.1,
+      "dense_weight": 1.0,
+      "method": "rrf",
+      "rrf_k": 60.0
+    },
+    "generated_at_unix_ms": 1794392749679,
+    "hybrid_queries": 0,
+    "label": "tokenizer-m2b2-identifiers"
+  },
+  "schema_version": 1,
+  "stages": {
+    "bm25_only": {
+      "candidate_recall": {
+        "hits": 9,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 9,
+      "hit_at_1": {
+        "hits": 7,
+        "score": 0.7777777777777778
+      },
+      "hit_at_4": {
+        "hits": 9,
+        "score": 1.0
+      },
+      "mean_ms_per_query": 0.5062052222222222,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 7.833333333333334,
+        "score": 0.8703703703703705
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 8.130929753571458,
+        "score": 0.9034366392857175
+      },
+      "recall_at_10": {
+        "hits": 9,
+        "score": 1.0
+      }
+    },
+    "dense_only": {
+      "available": false
+    },
+    "local_rerank": {
+      "candidate_recall": {
+        "hits": 9,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 9,
+      "hit_at_1": {
+        "hits": 7,
+        "score": 0.7777777777777778
+      },
+      "hit_at_4": {
+        "hits": 9,
+        "score": 1.0
+      },
+      "mean_ms_per_query": 1.546189,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 7.833333333333334,
+        "score": 0.8703703703703705
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 8.130929753571458,
+        "score": 0.9034366392857175
+      },
+      "recall_at_10": {
+        "hits": 9,
+        "score": 1.0
+      }
+    },
+    "retrieval": {
+      "candidate_recall": {
+        "hits": 9,
+        "k": 16,
+        "score": 1.0
+      },
+      "cases": 9,
+      "hit_at_1": {
+        "hits": 7,
+        "score": 0.7777777777777778
+      },
+      "hit_at_4": {
+        "hits": 9,
+        "score": 1.0
+      },
+      "mean_ms_per_query": 0.5564813333333334,
+      "mrr_at_10": {
+        "reciprocal_rank_sum": 7.833333333333334,
+        "score": 0.8703703703703705
+      },
+      "ndcg_at_10": {
+        "discounted_gain_sum": 8.130929753571458,
+        "score": 0.9034366392857175
+      },
+      "recall_at_10": {
+        "hits": 9,
+        "score": 1.0
+      }
+    }
+  },
+  "transitions": {
+    "dense_vs_bm25": {},
+    "rerank_vs_retrieval": {
+      "unchanged": 9
+    },
+    "retrieval_vs_bm25": {
+      "unchanged": 9
+    },
+    "retrieval_vs_dense": {}
+  }
+}

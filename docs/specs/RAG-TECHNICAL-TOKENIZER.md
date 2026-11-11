@@ -1,8 +1,8 @@
 # RAG Technical Tokenizer
 
 状态：M0 证据已冻结；M1 legacy module 提取与等价验收完成；M2-A identifier-parts Green、
-资源审计、identifier 专项集及 live Nomic Dense/Hybrid 控制均已完成并通过。下一切片为
-M2-B resource guard，尚未建立 Red。
+资源审计、identifier 专项集及 live Nomic Dense/Hybrid 控制均已完成并通过。M2-B1 resource
+guard 与 M2-B2 symbolic technical atoms 的 Green、专项集及质量门禁均已完成。
 
 ## 1. 为什么先建立 module
 
@@ -217,6 +217,159 @@ whole+parts Green、兼容性修正与收缩 ablation 的决策证据：
   Hybrid 30/30 unchanged 均一致。正式报告位于 `results/rag_quality/` 下的
   `tokenizer-m1-identifiers-focused-baseline.json`、`tokenizer-m2a-final-main.json`、
   `tokenizer-m2a-final-focused.json` 与 `tokenizer-m2a-final-nomic.json`。
+
+### 6.2 M2-B1：resource guards
+
+Agentty 的 `TokenizeOptions` 默认 `max_len = 40`，并在唯一 `flush()` 中执行长度过滤：
+`cur.size() <= opts_.max_len` 才进入 stopword/stem/output policy。这一形状值得保留——资源
+规则属于 tokenizer emission policy，不属于 BM25、rerank 或调用方；但不能照搬“整个
+candidate 超长就全部丢弃”，因为 `my_agent` 的 structured candidate 仍可能包含有用的短
+segments。
+
+对 160 个 Markdown 文件、251,119 次 ASCII candidate occurrence 的审计结果：
+
+- candidate span 长度 p50/p95/p99/p99.9/max 为 `4/11/17/26/49` bytes；
+- 最终 emitted token 长度 p50/p95/p99/p99.9/max 为 `4/9/12/17/36` bytes；
+- 单 candidate 输出数 p95/p99/p99.9/max 为 `2/3/5/11`；
+- 当前语料没有 emitted token 超过 40 bytes，也没有 candidate 输出超过 16 个 token。
+
+因此 M2-B1 冻结两个 implementation-private 常量，不增加 public options：
+
+```text
+max ASCII emitted token bytes      = 40（inclusive）
+max emitted tokens per candidate   = 16
+```
+
+40 bytes 保留 UUID（36）与 Git SHA-1（40），主动抑制 SHA-256、base64 和 minified run 等
+高基数 identity；16 为当前 corpus 最大值 11 留出约 45% 余量。
+
+输出契约：
+
+| 输入 | M2-B1 输出 | 目的 |
+|---|---|---|
+| 40-byte ASCII run | 原 token | 上界 inclusive |
+| 41-byte ASCII run | 空 | 过滤 pathological token |
+| `stable_<41 bytes>_tail` | `stable, tail` | 逐 representation 过滤，不丢整个 candidate |
+| `test_agent_timeline_per_event_hash_id_bounds_cost` | 九个源序 parts | 49-byte 合理 candidate 保持可检索 |
+| `part00_..._part17` | `part00` 至 `part15` | 每 candidate 最多 16 个输出 |
+
+policy 顺序为：Legacy 单字符过滤 → `<= 40` byte guard → candidate output budget → lowercase
+allocation。超长 representation 不占用 16-token budget；budget 按 ASCII candidate 重置，达到
+16 后忽略该 candidate 的后续派生表示，下一 candidate 正常处理。输出仍保持源顺序。
+
+Resource guard 还必须约束中间分析状态：不能先把任意数量的 `string_view` parts 收集进
+`vector`，最后才截断输出。Green 应使用 bounded buffer 或 streaming emitter，使 pathological
+camel/snake candidate 的临时空间为常数。scanner 仍负责定位 candidate，长度与预算规则仍
+集中在 emission policy。
+
+本切片 identity 为 `technical-tokenizer-v2-bounded-identifier-parts`。M2-B1 不顺手增加
+`C++`、flags、versions、paths 等 grammar；这些 forms 等 resource guard Green 与质量控制完成
+后再进入 M2-B2。
+
+M2-B1 Green 验收结果：
+
+- `Tokenizer.*` 为 `5/5`；完整 `rag_test` 为 `84/87`，剩余仍是 tokenizer 工作前已有的 3 个
+  Hybrid/RRF 默认权重断言失败；
+- 10,905 chunks 上没有 representation 触发 40-byte 或 16-token guard，因此 vocabulary
+  `11,300`、平均 doc length `87.2189`、postings `413,660` 均与 M2-A 完全相同；
+- 30-query main set 的 BM25 ranks 为 `30/30 unchanged`；9-case identifier set 为
+  `9/9 unchanged`。M2-B1 只增加 pathological-input 安全边界，没有改变当前语料质量。
+
+### 6.3 M2-B2：symbolic technical atoms
+
+本切片处理“少量上下文相关标点属于同一个技术 identity”的形式。Agentty tokenizer 会在所有
+非 alphanumeric 字符处 flush，因此没有可直接复制的 symbolic grammar；M2-B2 只继续借鉴其
+统一 emission policy，让新增 exact representation 与既有 legacy parts 共用 40-byte guard 和
+每 candidate 16-token budget。
+
+160-file corpus 的形态计数为：`C++` 118 次、CLI flags 826 次、dotted-number/version-like
+spans 685 次、HTTP protocol versions 16 次；`C#` 当前为 0 次，只作为语言符号规则的对称性
+契约。path-like spans 有 949 次，但其 whole/basename/extension/segment 表示选择会显著影响
+词表与长度，因此留给独立切片，不与本轮混合。
+
+输出契约：
+
+| 输入 | M2-B2 输出 | 说明 |
+|---|---|---|
+| `C++` | `c++` | 恢复被单字符过滤吞掉的语言 identity |
+| `C#` | `c#` | 同上 |
+| `C++26` | `c++26, c++, 26` | exact whole、语言 family、Legacy 数字 part |
+| `-k` | `-k` | 有符号的单字符 flag 是合法技术 token |
+| `-j2` | `-j2, j2` | exact flag + Legacy candidate |
+| `--auth-header` | `--auth-header, auth, header` | exact flag + M2-A parts |
+| `v1.2` | `v1.2, v1` | exact version + Legacy part |
+| `v1.2.3-beta` | `v1.2.3-beta, v1, beta` | exact version + Legacy source-order parts |
+| `HTTP/2` | `http/2, http` | exact protocol version + Legacy part |
+| `HTTP/1.1` | `http/1.1, http` | 同上 |
+
+负契约：`C + +` 不合并；Markdown `- item` 不是 flag；`Quick-Brown` 保持既有 prose/hyphen
+行为；`k1=1.5` 中无 `v` 的小数不在本切片冒充 version；`src/io/auth.cpp` 仍只产生 Legacy path
+parts，不产生 path whole。
+
+symbolic exact representation 先输出，随后输出既有 Legacy/M2-A representations；所有表示都
+经同一个 `CandidateEmitter`，超长 exact whole 不占 budget，derived parts 仍可继续输出。本切片
+不增加 public options，不改变非 ASCII 流程，不引入通用 URL/path parser。Green identity 为
+`technical-tokenizer-v2-bounded-symbolic-atoms`。
+
+M2-B2 Green 与评测结果：
+
+- tokenizer/synthetic BM25 定向测试 `7/7` 通过；完整 `rag_test` 为 `86/89`，剩余仍是既有
+  3 个 Hybrid/RRF 默认权重断言失败；
+- 相对 M2-B1，10,905 chunks 上 vocabulary `11,300 → 11,506`（`+1.82%`），平均 doc
+  length `87.2189 → 87.4635`（`+0.28%`），postings `413,660 → 415,266`
+  （`+0.39%`）；
+- 8-case symbolic 专项 BM25 为 3 improved / 0 degraded / 5 unchanged：`C++26` rank
+  `2 → 1`、`--auth-header` `3 → 1`、`--sandbox-backend` `3 → 1`；Hit@1
+  `0.625 → 1.000`，MRR@10 `0.771 → 1.000`；
+- 9-case identifier 专项为 `9/9 unchanged`；30-query main BM25 为 0 improved / 1
+  degraded / 29 unchanged，一条自然语言查询从 rank `7 → 8`，MRR@10 与 nDCG@10 各下降
+  约 `0.0006`；
+- `nomic-embed-text:latest`、K=16、等权 RRF 的 main control 中，Dense-only `30/30`
+  unchanged，Hybrid `30/30` unchanged；local rerank 有 2 条各退一位，其中一条 rank-1
+  变为 rank-2；
+- symbolic live control 中，Hybrid 为 1 improved / 2 degraded / 5 unchanged，但 Hit@1
+  `0.625 → 0.750`、MRR@10 `0.740 → 0.810`，没有 candidate loss。
+
+local rerank 回退的候选诊断表明：symbolic exact tokens 没有直接进入两条自然语言 query；它们
+改变了部分文档长度和 BM25 route rank，使等权 RRF 分差轻微移动。Hybrid gold rank 本身保持
+不变，但 local rerank 对 retrieval score 做 min-max normalization 后，临界候选被 lexical
+coverage 项反超。这是可解释的下游敏感性，不是 Dense 漂移。
+
+决策：保留 M2-B2。其专项 exact-identity 收益明确，资源增幅远小于被拒绝的 structured whole，
+且 main Hybrid 没有 rank 或 candidate 回退。local rerank 的两条回退作为已知代价保留，不用
+专项满分掩盖；后续若采用 postings-based coverage、BM25F/identity field 或调整 local rerank，
+必须作为独立变量评估，不能在 tokenizer 切片中顺手修正。
+
+正式报告：
+
+```text
+results/rag_quality/tokenizer-m2a-symbolic-focused-baseline.json
+results/rag_quality/tokenizer-m2b2-main.json
+results/rag_quality/tokenizer-m2b2-identifiers.json
+results/rag_quality/tokenizer-m2b2-symbolic-focused.json
+results/rag_quality/tokenizer-m2a-nomic-symbolic-baseline.json
+results/rag_quality/tokenizer-m2b2-nomic-main.json
+results/rag_quality/tokenizer-m2b2-nomic-symbolic.json
+results/rag_quality/tokenizer-m2b2-nomic-main-diagnostics.json
+```
+
+### 6.4 M2 收口：path whole 与 error-code 特例暂不实现
+
+M2-B2 后对 path/file forms 做了单独 corpus 审计：常见源码、配置与文档扩展名的 filename-like
+occurrence 约 `1,687` 次，涉及约 `1,041` 个不同 basename；dot-prefixed forms 约 `1,077`
+次、`520` 个不同值；更宽的 path-like span 约 `949` 次。直接增加 `auth.cpp`、
+`settings.json` 或完整 `src/io/auth.cpp` whole 会引入大量高基数 term，并让所有包含文件引用的
+文档承担额外 length-normalization 成本。这与 M2-A 已拒绝 structured whole 的风险同形。
+
+当前 parts 已可支持 path 的部分匹配：`src/io/auth.cpp` 产生 `src, io, auth, cpp`，内部 camel
+identifier 仍有 semantic parts。若未来需要 exact filename/path identity，应优先实验独立
+identity field、BM25F 或不计入正文长度的 synonym/overlap token，而不是在当前扁平 token 序列
+中增加 whole。
+
+常见 error forms 目前也已被现有规则覆盖：`EACCES` 是普通 ASCII token，HTTP `401/429` 是
+数字 token，`ERR_CONNECTION_RESET`、`std::errc::...` 可由 identifier/namespace parts
+检索。重新增加它们的 structured whole 会回到 M2-A 已否决的表示。因此 M2 不再新增 path
+whole 或 error-code 专用 grammar；后续主线转入 M3 UTF-8 decode、script boundary 与 CJK run。
 
 ## 7. 测试矩阵
 

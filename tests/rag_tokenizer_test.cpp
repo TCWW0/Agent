@@ -62,16 +62,53 @@ TEST(Tokenizer, CompositeIdentifiersPreserveLegacyIdentityAndAddSemanticParts) {
         {"retrieval-cache",
          {"retrieval", "cache"}},
         {"hybrid retrieval weights", {"hybrid", "retrieval", "weights"}},
-
-        // M2-A does not enable the technical-form rules reserved for M2-B.
-        {"C++", {}},
-        {"v1.2", {"v1"}},
     });
 }
 
-TEST(Tokenizer, IdentityNamesTheCompositeIdentifierContract) {
+TEST(Tokenizer, ResourceGuardsBoundPathologicalCandidatesWithoutDroppingUsefulParts) {
+    const std::string forty_bytes(40, 'a');
+    const std::string forty_one_bytes(41, 'a');
+
+    expect_tokens({
+        {forty_bytes, {forty_bytes}},
+        {forty_one_bytes, {}},
+        {"stable_" + forty_one_bytes + "_tail", {"stable", "tail"}},
+        {"test_agent_timeline_per_event_hash_id_bounds_cost",
+         {"test", "agent", "timeline", "per", "event", "hash", "id",
+          "bounds", "cost"}},
+        {"part00_part01_part02_part03_part04_part05_part06_part07_part08_"
+         "part09_part10_part11_part12_part13_part14_part15_part16_part17",
+         {"part00", "part01", "part02", "part03", "part04", "part05",
+          "part06", "part07", "part08", "part09", "part10", "part11",
+          "part12", "part13", "part14", "part15"}},
+    });
+}
+
+TEST(Tokenizer, SymbolicTechnicalAtomsPreserveExactAndLegacyRepresentations) {
+    expect_tokens({
+        {"C++", {"c++"}},
+        {"C#", {"c#"}},
+        {"C++26", {"c++26", "c++", "26"}},
+        {"-k", {"-k"}},
+        {"-j2", {"-j2", "j2"}},
+        {"--auth-header", {"--auth-header", "auth", "header"}},
+        {"v1.2", {"v1.2", "v1"}},
+        {"v1.2.3-beta", {"v1.2.3-beta", "v1", "beta"}},
+        {"HTTP/2", {"http/2", "http"}},
+        {"HTTP/1.1", {"http/1.1", "http"}},
+
+        // M2-B2 deliberately leaves ambiguous punctuation and paths alone.
+        {"C + + result", {"result"}},
+        {"- item", {"item"}},
+        {"Quick-Brown", {"quick", "brown"}},
+        {"k1=1.5", {"k1"}},
+        {"src/io/auth.cpp", {"src", "io", "auth", "cpp"}},
+    });
+}
+
+TEST(Tokenizer, IdentityNamesTheSymbolicAtomContract) {
     EXPECT_EQ(rag::tokenizer_identity(),
-              "technical-tokenizer-v2-identifier-parts");
+              "technical-tokenizer-v2-bounded-symbolic-atoms");
 }
 
 } // namespace

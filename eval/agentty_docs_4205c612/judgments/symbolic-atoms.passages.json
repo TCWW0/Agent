@@ -1,0 +1,57 @@
+{
+  "tool": "search_docs",
+  "purpose": "M2-B2 symbolic technical atom retrieval slice",
+  "cases": [
+    {
+      "q": "C++26 toolchain CMake requirements",
+      "gold": [
+        {"path": "website/building.md", "line_start": 9, "line_end": 18}
+      ]
+    },
+    {
+      "q": "--auth-header X-API-Key",
+      "gold": [
+        {"path": "auth.md", "line_start": 25, "line_end": 38}
+      ]
+    },
+    {
+      "q": "-k one-off API key override",
+      "gold": [
+        {"path": "auth.md", "line_start": 7, "line_end": 20}
+      ]
+    },
+    {
+      "q": "--sandbox-backend bwrap claybin",
+      "gold": [
+        {"path": "SANDBOX.md", "line_start": 71, "line_end": 84},
+        {"path": "website/sandboxing.md", "line_start": 90, "line_end": 100},
+        {"path": "website/sandboxing.md", "line_start": 117, "line_end": 120}
+      ]
+    },
+    {
+      "q": "v0.2.10 v0.2.11 Windows MSI",
+      "gold": [
+        {"path": "website/content/blog/agentty-0-2-11-cost-aware-agent.md", "line_start": 9, "line_end": 15},
+        {"path": "website/content/blog/agentty-0-2-11-cost-aware-agent.md", "line_start": 98, "line_end": 106}
+      ]
+    },
+    {
+      "q": "v0.7.0 loop mode shipped",
+      "gold": [
+        {"path": "design/loop-mode.md", "line_start": 1, "line_end": 9}
+      ]
+    },
+    {
+      "q": "HTTP/2 SSE NDJSON native C++ transport",
+      "gold": [
+        {"path": "provider-registry-design.md", "line_start": 9, "line_end": 15}
+      ]
+    },
+    {
+      "q": "HTTP/1.1 streaming gateway ALPN",
+      "gold": [
+        {"path": "website/proxies.md", "line_start": 37, "line_end": 45}
+      ]
+    }
+  ]
+}

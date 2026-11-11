@@ -401,6 +401,34 @@ TEST(Bm25, CamelIdentifierIsSearchableBySemanticParts) {
     EXPECT_EQ(hits[0].first, 0u);
 }
 
+TEST(Bm25, SymbolicTechnicalAtomsAddExactMatchEvidence) {
+    struct SearchCase {
+        std::string query;
+        std::string ambiguous;
+        std::string exact;
+    };
+
+    const std::vector<SearchCase> cases{
+        {"C++26", "compiler standard 26", "compiler standard C++26"},
+        {"--auth-header", "configure auth header", "configure --auth-header"},
+        {"v1.2", "release v1 candidate", "release v1.2 candidate"},
+        {"HTTP/2", "transport http fallback", "transport HTTP/2 fallback"},
+    };
+
+    for (const SearchCase& test_case : cases) {
+        SCOPED_TRACE(test_case.query);
+        const std::vector<rag::Chunk> chunks{
+            make_chunk(test_case.ambiguous),
+            make_chunk(test_case.exact),
+        };
+        const auto index = rag::build_bm25(chunks);
+        const auto hits = rag::bm25_search(index, test_case.query, 2);
+
+        ASSERT_FALSE(hits.empty());
+        EXPECT_EQ(hits[0].first, 1u);
+    }
+}
+
 TEST(EmbedInput,NomicDocAndQueryPrefixes) {
     EXPECT_EQ(rag::embed_input_text("nomic-embed-text", rag::EmbedRole::Doc, "安装指南"),
             "search_document: 安装指南");
